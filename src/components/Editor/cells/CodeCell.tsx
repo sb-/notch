@@ -71,16 +71,15 @@ export default function CodeCell({
       if (!position || !model) return;
 
       if (key === 'ArrowUp' && onNavigatePrev) {
-        // At line 1, column 1 (top-left corner)
-        if (position.lineNumber === 1 && position.column === 1) {
+        // On line 1 - navigate to previous cell
+        if (position.lineNumber === 1) {
           e.browserEvent.preventDefault();
           onNavigatePrev();
         }
       } else if (key === 'ArrowDown' && onNavigateNext) {
-        // At last line, last column (bottom-right corner)
+        // On last line - navigate to next cell
         const lastLine = model.getLineCount();
-        const lastColumn = model.getLineMaxColumn(lastLine);
-        if (position.lineNumber === lastLine && position.column === lastColumn) {
+        if (position.lineNumber === lastLine) {
           e.browserEvent.preventDefault();
           onNavigateNext();
         }

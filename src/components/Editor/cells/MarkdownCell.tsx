@@ -97,13 +97,17 @@ export default function MarkdownCell({ data, onChange, onFocus, isFocused, onBac
     // Arrow key navigation between cells
     if (e.key === 'ArrowUp' && onNavigatePrev) {
       const { selectionStart } = textarea;
-      if (selectionStart === 0) {
+      const textBeforeCursor = data.substring(0, selectionStart);
+      // Only navigate if we're on the first line (no newline before cursor)
+      if (!textBeforeCursor.includes('\n')) {
         e.preventDefault();
         onNavigatePrev();
       }
     } else if (e.key === 'ArrowDown' && onNavigateNext) {
-      const { selectionStart, selectionEnd } = textarea;
-      if (selectionStart === data.length && selectionEnd === data.length) {
+      const { selectionStart } = textarea;
+      const textAfterCursor = data.substring(selectionStart);
+      // Only navigate if we're on the last line (no newline after cursor)
+      if (!textAfterCursor.includes('\n')) {
         e.preventDefault();
         onNavigateNext();
       }
