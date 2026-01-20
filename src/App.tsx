@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, message, ask } from '@tauri-apps/plugin-dialog';
 import { useStore, useLayoutMode, useSidebarVisible } from './store';
-import { importQuiverLibrary } from './services/import';
+import { importQuiverLibrary, scanForDuplicates, type ImportProgress } from './services/import';
 import { exportNoteToMarkdown, exportNoteToHTML, exportNoteToJSON, saveToFile } from './services/export';
 import Sidebar from './components/Sidebar/Sidebar';
 import NoteList from './components/NoteList/NoteList';
@@ -26,6 +26,7 @@ declare global {
 export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
   const loadData = useStore(state => state.loadData);
   const layoutMode = useLayoutMode();
   const sidebarVisible = useSidebarVisible();
@@ -56,18 +57,94 @@ export default function App() {
       },
       importLibrary: async () => {
         const selected = await open({
-          directory: true,
           multiple: false,
           title: 'Select Quiver Library (.qvlibrary)',
+          filters: [{
+            name: 'Quiver Library',
+            extensions: ['qvlibrary']
+          }]
         });
-        if (selected) {
-          try {
-            const result = await importQuiverLibrary(selected as string);
-            alert(`Imported ${result.notebooks} notebooks with ${result.notes} notes.${result.errors.length > 0 ? `\n\nErrors:\n${result.errors.join('\n')}` : ''}`);
-            await useStore.getState().loadData();
-          } catch (err) {
-            alert(`Import failed: ${err}`);
+        if (!selected) return;
+
+        try {
+          // Scan for duplicates first
+          setImportProgress({
+            phase: 'scanning',
+            notebooksTotal: 0,
+            notebooksCompleted: 0,
+            notesTotal: 0,
+            notesCompleted: 0,
+          });
+
+          const duplicates = await scanForDuplicates(selected as string);
+          setImportProgress(null);
+
+          let skipDuplicates = false;
+
+          // If duplicates found, ask user what to do
+          if (duplicates.notebookNames.length > 0) {
+            const duplicateList = duplicates.notebookNames.slice(0, 5).join(', ');
+            const moreCount = duplicates.notebookNames.length - 5;
+            const duplicateMsg = moreCount > 0
+              ? `${duplicateList}, and ${moreCount} more`
+              : duplicateList;
+
+            const shouldContinue = await ask(
+              `Found ${duplicates.notebookNames.length} notebook(s) that already exist:\n\n${duplicateMsg}\n\nDo you want to skip these and import only new notebooks?`,
+              {
+                title: 'Duplicate Notebooks Found',
+                kind: 'warning',
+                okLabel: 'Skip Duplicates',
+                cancelLabel: 'Import All (Create Duplicates)',
+              }
+            );
+
+            if (shouldContinue === null) {
+              // User closed the dialog without choosing
+              return;
+            }
+            skipDuplicates = shouldContinue;
           }
+
+          // Start import
+          setImportProgress({
+            phase: 'scanning',
+            notebooksTotal: 0,
+            notebooksCompleted: 0,
+            notesTotal: 0,
+            notesCompleted: 0,
+          });
+
+          const result = await importQuiverLibrary(selected as string, {
+            skipDuplicates,
+            onProgress: (progress) => setImportProgress({ ...progress }),
+          });
+
+          setImportProgress(null);
+          await useStore.getState().loadData();
+
+          // Format result message
+          let msg = `Successfully imported ${result.notesImported} notes from ${result.notebooks} notebooks.`;
+          if (result.notebooksSkipped > 0) {
+            msg += `\n\nSkipped ${result.notebooksSkipped} duplicate notebook(s).`;
+          }
+          if (result.notesFailed > 0) {
+            msg += `\n\nFailed to import ${result.notesFailed} notes:`;
+            for (const err of result.errors.slice(0, 10)) {
+              msg += `\n• "${err.noteTitle}": ${err.error}`;
+            }
+            if (result.errors.length > 10) {
+              msg += `\n... and ${result.errors.length - 10} more errors`;
+            }
+          }
+
+          await message(msg, {
+            title: result.notesFailed > 0 ? 'Import Completed with Errors' : 'Import Completed',
+            kind: result.notesFailed > 0 ? 'warning' : 'info',
+          });
+        } catch (err) {
+          setImportProgress(null);
+          await message(`Import failed: ${err}`, { title: 'Import Error', kind: 'error' });
         }
       },
       exportNote: async () => {
@@ -198,6 +275,33 @@ export default function App() {
       {sidebarVisible && layoutMode === 'triple' && <Sidebar />}
       {(layoutMode === 'triple' || layoutMode === 'double') && <NoteList />}
       <NoteEditor />
+      {importProgress && (
+        <div className="import-overlay">
+          <div className="import-modal">
+            <div className="import-title">Importing Quiver Library</div>
+            <div className="import-status">
+              {importProgress.phase === 'scanning' ? (
+                'Scanning library...'
+              ) : (
+                <>
+                  <div className="import-notebook">
+                    Notebook: {importProgress.currentNotebook || '...'}
+                  </div>
+                  <div className="import-note">
+                    Note: {importProgress.currentNote || '...'}
+                  </div>
+                  <div className="import-counts">
+                    {importProgress.notebooksCompleted} / {importProgress.notebooksTotal} notebooks
+                    {' • '}
+                    {importProgress.notesCompleted} notes imported
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="import-spinner" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

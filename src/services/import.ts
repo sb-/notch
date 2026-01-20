@@ -28,6 +28,86 @@ interface QuiverNoteContent {
   cells: QuiverCellData[];
 }
 
+export interface ImportProgress {
+  phase: 'scanning' | 'importing';
+  currentNotebook?: string;
+  currentNote?: string;
+  notebooksTotal: number;
+  notebooksCompleted: number;
+  notesTotal: number;
+  notesCompleted: number;
+}
+
+export interface ImportError {
+  noteTitle: string;
+  notePath: string;
+  error: string;
+}
+
+export interface ImportResult {
+  notebooks: number;
+  notebooksSkipped: number;
+  notesImported: number;
+  notesFailed: number;
+  errors: ImportError[];
+}
+
+export interface DuplicateInfo {
+  notebookNames: string[];
+  totalNotebooks: number;
+}
+
+type ProgressCallback = (progress: ImportProgress) => void;
+
+/**
+ * Scan a Quiver library for potential duplicate notebooks
+ */
+export async function scanForDuplicates(libraryPath: string): Promise<DuplicateInfo> {
+  const existingNotebooks = await db.getAllNotebooks();
+  const existingNames = new Set(existingNotebooks.map(n => n.name.toLowerCase()));
+
+  const duplicateNames: string[] = [];
+  let totalNotebooks = 0;
+
+  try {
+    const entries = await readDir(libraryPath);
+
+    for (const entry of entries) {
+      if (entry.isDirectory && entry.name.endsWith('.qvnotebook')) {
+        totalNotebooks++;
+        try {
+          const metaPath = `${libraryPath}/${entry.name}/meta.json`;
+          const metaContent = await readTextFile(metaPath);
+          const meta: QuiverNotebookMeta = JSON.parse(metaContent);
+
+          if (existingNames.has(meta.name.toLowerCase())) {
+            duplicateNames.push(meta.name);
+          }
+        } catch {
+          // Skip notebooks we can't read
+        }
+      }
+    }
+  } catch {
+    // Return empty if we can't read the library
+  }
+
+  return {
+    notebookNames: duplicateNames,
+    totalNotebooks,
+  };
+}
+
+/**
+ * Sanitize JSON string by fixing invalid escape sequences
+ */
+function sanitizeJsonString(str: string): string {
+  // Fix invalid hex escapes like \x00 - JSON only supports \uXXXX
+  return str.replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => {
+    return '\\u00' + hex;
+  });
+}
+
 // Map Quiver cell types to our types
 function mapCellType(quiverType: string): CellType {
   switch (quiverType) {
@@ -58,55 +138,128 @@ function mapDiagramType(quiverType?: string): DiagramType | undefined {
   }
 }
 
+export interface ImportOptions {
+  skipDuplicates?: boolean;
+  onProgress?: ProgressCallback;
+}
+
 /**
  * Import a Quiver library (.qvlibrary directory)
  */
-export async function importQuiverLibrary(libraryPath: string): Promise<{
-  notebooks: number;
-  notes: number;
-  errors: string[];
-}> {
-  const result = {
+export async function importQuiverLibrary(
+  libraryPath: string,
+  options: ImportOptions = {}
+): Promise<ImportResult> {
+  const { skipDuplicates = false, onProgress } = options;
+
+  const result: ImportResult = {
     notebooks: 0,
-    notes: 0,
-    errors: [] as string[],
+    notebooksSkipped: 0,
+    notesImported: 0,
+    notesFailed: 0,
+    errors: [],
   };
+
+  const progress: ImportProgress = {
+    phase: 'scanning',
+    notebooksTotal: 0,
+    notebooksCompleted: 0,
+    notesTotal: 0,
+    notesCompleted: 0,
+  };
+
+  // Get existing notebook names for duplicate checking
+  const existingNotebooks = await db.getAllNotebooks();
+  const existingNames = new Set(existingNotebooks.map(n => n.name.toLowerCase()));
 
   try {
     // Read the library directory
     const entries = await readDir(libraryPath);
 
     // Find all .qvnotebook directories
-    for (const entry of entries) {
-      if (entry.isDirectory && entry.name.endsWith('.qvnotebook')) {
+    const notebookEntries = entries.filter(
+      entry => entry.isDirectory && entry.name.endsWith('.qvnotebook')
+    );
+
+    progress.notebooksTotal = notebookEntries.length;
+    progress.phase = 'importing';
+    onProgress?.(progress);
+
+    for (const entry of notebookEntries) {
+      try {
+        const notebookPath = `${libraryPath}/${entry.name}`;
+
+        // Read notebook name for progress and duplicate check
+        let notebookName = entry.name;
         try {
-          const notebookPath = `${libraryPath}/${entry.name}`;
-          const notebookResult = await importQuiverNotebook(notebookPath);
-          result.notebooks++;
-          result.notes += notebookResult.notes;
-          result.errors.push(...notebookResult.errors);
-        } catch (err) {
-          result.errors.push(`Failed to import notebook ${entry.name}: ${err}`);
+          const metaContent = await readTextFile(`${notebookPath}/meta.json`);
+          const meta: QuiverNotebookMeta = JSON.parse(metaContent);
+          notebookName = meta.name;
+          progress.currentNotebook = meta.name;
+        } catch {
+          progress.currentNotebook = entry.name;
         }
+        onProgress?.(progress);
+
+        // Skip if duplicate and skipDuplicates is enabled
+        if (skipDuplicates && existingNames.has(notebookName.toLowerCase())) {
+          result.notebooksSkipped++;
+          progress.notebooksCompleted++;
+          onProgress?.(progress);
+          continue;
+        }
+
+        const notebookResult = await importQuiverNotebook(notebookPath, (noteProgress) => {
+          progress.currentNote = noteProgress.currentNote;
+          progress.notesTotal = progress.notesCompleted + noteProgress.notesTotal;
+          onProgress?.(progress);
+        });
+
+        result.notebooks++;
+        result.notesImported += notebookResult.notesImported;
+        result.notesFailed += notebookResult.notesFailed;
+        result.errors.push(...notebookResult.errors);
+        progress.notebooksCompleted++;
+        progress.notesCompleted += notebookResult.notesImported + notebookResult.notesFailed;
+        onProgress?.(progress);
+      } catch (err) {
+        result.errors.push({
+          noteTitle: entry.name,
+          notePath: entry.name,
+          error: `Failed to import notebook: ${err}`,
+        });
       }
     }
   } catch (err) {
-    result.errors.push(`Failed to read library: ${err}`);
+    result.errors.push({
+      noteTitle: 'Library',
+      notePath: libraryPath,
+      error: `Failed to read library: ${err}`,
+    });
   }
 
   return result;
 }
 
+interface NotebookProgressCallback {
+  (progress: { currentNote?: string; notesTotal: number; notesCompleted: number }): void;
+}
+
 /**
  * Import a single Quiver notebook (.qvnotebook directory)
  */
-async function importQuiverNotebook(notebookPath: string): Promise<{
-  notes: number;
-  errors: string[];
+async function importQuiverNotebook(
+  notebookPath: string,
+  onProgress?: NotebookProgressCallback
+): Promise<{
+  notesImported: number;
+  notesFailed: number;
+  errors: ImportError[];
 }> {
   const result = {
-    notes: 0,
-    errors: [] as string[],
+    notesImported: 0,
+    notesFailed: 0,
+    errors: [] as ImportError[],
   };
 
   try {
@@ -120,19 +273,48 @@ async function importQuiverNotebook(notebookPath: string): Promise<{
 
     // Read all .qvnote directories
     const entries = await readDir(notebookPath);
-    for (const entry of entries) {
-      if (entry.isDirectory && entry.name.endsWith('.qvnote')) {
+    const noteEntries = entries.filter(
+      entry => entry.isDirectory && entry.name.endsWith('.qvnote')
+    );
+
+    for (let i = 0; i < noteEntries.length; i++) {
+      const entry = noteEntries[i];
+      const notePath = `${notebookPath}/${entry.name}`;
+      let noteTitle = entry.name;
+
+      try {
+        // Try to get the note title for progress/errors
         try {
-          const notePath = `${notebookPath}/${entry.name}`;
-          await importQuiverNote(notePath, notebook.id);
-          result.notes++;
-        } catch (err) {
-          result.errors.push(`Failed to import note ${entry.name}: ${err}`);
+          const noteMetaContent = await readTextFile(`${notePath}/meta.json`);
+          const noteMeta: QuiverNoteMeta = JSON.parse(noteMetaContent);
+          noteTitle = noteMeta.title || entry.name;
+        } catch {
+          // Use entry name if meta fails
         }
+
+        onProgress?.({
+          currentNote: noteTitle,
+          notesTotal: noteEntries.length,
+          notesCompleted: i,
+        });
+
+        await importQuiverNote(notePath, notebook.id);
+        result.notesImported++;
+      } catch (err) {
+        result.notesFailed++;
+        result.errors.push({
+          noteTitle,
+          notePath: entry.name,
+          error: String(err),
+        });
       }
     }
   } catch (err) {
-    result.errors.push(`Failed to read notebook metadata: ${err}`);
+    result.errors.push({
+      noteTitle: 'Notebook',
+      notePath: notebookPath,
+      error: `Failed to read notebook metadata: ${err}`,
+    });
   }
 
   return result;
@@ -145,12 +327,12 @@ async function importQuiverNote(notePath: string, notebookId: string): Promise<v
   // Read note meta.json
   const metaPath = `${notePath}/meta.json`;
   const metaContent = await readTextFile(metaPath);
-  const meta: QuiverNoteMeta = JSON.parse(metaContent);
+  const meta: QuiverNoteMeta = JSON.parse(sanitizeJsonString(metaContent));
 
   // Read note content.json
   const contentPath = `${notePath}/content.json`;
   const contentStr = await readTextFile(contentPath);
-  const content: QuiverNoteContent = JSON.parse(contentStr);
+  const content: QuiverNoteContent = JSON.parse(sanitizeJsonString(contentStr));
 
   // Create the note
   const note = await db.createNote(notebookId, content.title || meta.title);
