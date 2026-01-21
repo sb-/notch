@@ -3,7 +3,23 @@ import { marked } from 'marked';
 import hljs from 'highlight.js';
 import katex from 'katex';
 import mermaid from 'mermaid';
+import DOMPurify from 'dompurify';
 import type { Note } from '../../types';
+
+// Configure DOMPurify for text cells
+const sanitizeConfig: DOMPurify.Config = {
+  ALLOWED_TAGS: [
+    'p', 'br', 'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'del',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'ul', 'ol', 'li',
+    'blockquote', 'pre', 'code',
+    'a', 'span', 'div',
+    'table', 'thead', 'tbody', 'tr', 'th', 'td',
+    'hr', 'sub', 'sup',
+  ],
+  ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'style'],
+  ALLOW_DATA_ATTR: false,
+};
 
 interface NotePreviewProps {
   note: Note;
@@ -47,9 +63,13 @@ export default function NotePreview({ note }: NotePreviewProps) {
       switch (cell.type) {
         case 'text':
           return (
-            <div key={key} className="preview-cell preview-text">
-              <p style={{ whiteSpace: 'pre-wrap' }}>{cell.data}</p>
-            </div>
+            <div
+              key={key}
+              className="preview-cell preview-text cell-richtext"
+              dangerouslySetInnerHTML={{
+                __html: DOMPurify.sanitize(cell.data, sanitizeConfig)
+              }}
+            />
           );
 
         case 'code':

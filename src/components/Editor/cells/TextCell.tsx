@@ -1,4 +1,5 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useCallback } from 'react';
+import DOMPurify from 'dompurify';
 
 interface TextCellProps {
   data: string;
@@ -10,70 +11,130 @@ interface TextCellProps {
   onNavigateNext?: () => void;
 }
 
-export default function TextCell({ data, onChange, onFocus, isFocused, onBackspaceEmpty, onNavigatePrev, onNavigateNext }: TextCellProps) {
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+// Configure DOMPurify to allow safe HTML elements and attributes
+const sanitizeConfig: DOMPurify.Config = {
+  ALLOWED_TAGS: [
+    'p', 'br', 'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'del',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'ul', 'ol', 'li',
+    'blockquote', 'pre', 'code',
+    'a', 'span', 'div',
+    'table', 'thead', 'tbody', 'tr', 'th', 'td',
+    'hr', 'sub', 'sup',
+  ],
+  ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'style'],
+  ALLOW_DATA_ATTR: false,
+};
 
-  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    onChange(e.target.value);
+function sanitizeHtml(html: string): string {
+  return DOMPurify.sanitize(html, sanitizeConfig);
+}
+
+export default function TextCell({
+  data,
+  onChange,
+  onFocus,
+  isFocused,
+  onBackspaceEmpty,
+  onNavigatePrev,
+  onNavigateNext,
+}: TextCellProps) {
+  const editorRef = useRef<HTMLDivElement>(null);
+  const isComposing = useRef(false);
+  const initializedRef = useRef(false);
+
+  // Set initial content only once on mount
+  useEffect(() => {
+    if (editorRef.current && !initializedRef.current) {
+      editorRef.current.innerHTML = sanitizeHtml(data);
+      initializedRef.current = true;
+    }
+  }, []);
+
+  // Handle input changes - just notify parent, don't touch DOM
+  const handleInput = useCallback(() => {
+    if (editorRef.current && !isComposing.current) {
+      onChange(editorRef.current.innerHTML);
+    }
+  }, [onChange]);
+
+  const handleCompositionStart = () => {
+    isComposing.current = true;
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
+  const handleCompositionEnd = () => {
+    isComposing.current = false;
+    handleInput();
+  };
 
-    if (e.key === 'Backspace' && !data.trim() && onBackspaceEmpty) {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    const isEmpty = !editor.textContent?.trim();
+
+    if (e.key === 'Backspace' && isEmpty && onBackspaceEmpty) {
       e.preventDefault();
       onBackspaceEmpty();
       return;
     }
 
-    // Arrow key navigation between cells
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return;
+
     if (e.key === 'ArrowUp' && onNavigatePrev) {
-      const { selectionStart } = textarea;
-      const textBeforeCursor = data.substring(0, selectionStart);
-      // Only navigate if we're on the first line (no newline before cursor)
-      if (!textBeforeCursor.includes('\n')) {
+      const range = selection.getRangeAt(0);
+      const rect = range.getBoundingClientRect();
+      const editorRect = editor.getBoundingClientRect();
+      if (rect.top - editorRect.top < 20) {
         e.preventDefault();
         onNavigatePrev();
       }
     } else if (e.key === 'ArrowDown' && onNavigateNext) {
-      const { selectionStart } = textarea;
-      const textAfterCursor = data.substring(selectionStart);
-      // Only navigate if we're on the last line (no newline after cursor)
-      if (!textAfterCursor.includes('\n')) {
+      const range = selection.getRangeAt(0);
+      const rect = range.getBoundingClientRect();
+      const editorRect = editor.getBoundingClientRect();
+      if (editorRect.bottom - rect.bottom < 20) {
         e.preventDefault();
         onNavigateNext();
       }
     }
   };
 
-  // Auto-resize textarea
-  const adjustHeight = () => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = textareaRef.current.scrollHeight + 'px';
-    }
-  };
-
-  useEffect(() => {
-    adjustHeight();
-  }, [data]);
-
   // Auto-focus when cell becomes focused
   useEffect(() => {
-    if (isFocused && textareaRef.current) {
-      textareaRef.current.focus();
+    if (isFocused && editorRef.current) {
+      editorRef.current.focus();
+      // Place cursor at end
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(editorRef.current);
+      range.collapse(false);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
     }
   }, [isFocused]);
 
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    e.preventDefault();
+    const html = e.clipboardData.getData('text/html');
+    const text = e.clipboardData.getData('text/plain');
+    const content = html ? sanitizeHtml(html) : text;
+    document.execCommand('insertHTML', false, content);
+  }, []);
+
   return (
-    <textarea
-      ref={textareaRef}
-      className="cell-editor"
-      value={data}
-      onChange={handleChange}
+    <div
+      ref={editorRef}
+      className="cell-textarea cell-richtext"
+      contentEditable
+      onInput={handleInput}
       onFocus={onFocus}
       onKeyDown={handleKeyDown}
+      onPaste={handlePaste}
+      onCompositionStart={handleCompositionStart}
+      onCompositionEnd={handleCompositionEnd}
+      suppressContentEditableWarning
     />
   );
 }

@@ -129,7 +129,7 @@ export default function CodeCell({
             verticalScrollbarSize: 8,
             horizontalScrollbarSize: 8,
           },
-          padding: { top: 8, bottom: 8, left: 10 },
+          padding: { top: 12, bottom: 12, left: 8 },
           overviewRulerBorder: false,
           overviewRulerLanes: 0,
           hideCursorInOverviewRuler: true,
@@ -139,6 +139,15 @@ export default function CodeCell({
           wordBasedSuggestions: 'off',
           snippetSuggestions: 'none',
           inlineSuggest: { enabled: false },
+          // Disable word selection on click
+          occurrencesHighlight: 'off',
+          selectionHighlight: false,
+          // Disable double-click word select expansion
+          wordSeparators: '',
+          // Simpler cursor behavior
+          cursorBlinking: 'solid',
+          cursorStyle: 'line',
+          selectOnLineNumbers: false,
         }}
       />
     </div>

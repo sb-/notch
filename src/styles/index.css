@@ -687,7 +687,7 @@ body {
 .cell-editor {
   width: 100%;
   min-height: 20px;
-  padding: 6px 10px;
+  padding: 12px 16px;
   border: 1px solid transparent;
   border-radius: 6px;
   resize: none;
@@ -716,12 +716,129 @@ body {
   border-color: var(--border-color);
 }
 
+/* Rich text cell (contentEditable) */
+.cell-richtext {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.cell-richtext:empty::before {
+  content: 'Type here...';
+  color: var(--text-tertiary);
+}
+
+.cell-richtext ul,
+.cell-richtext ol {
+  margin: 0.25em 0;
+  padding-left: 1.5em;
+}
+
+.cell-richtext li {
+  margin: 0.1em 0;
+}
+
+.cell-richtext a {
+  color: var(--accent-color);
+  text-decoration: underline;
+}
+
+.cell-richtext a:hover {
+  color: var(--accent-hover);
+}
+
+.cell-richtext b,
+.cell-richtext strong {
+  font-weight: 600;
+}
+
+.cell-richtext i,
+.cell-richtext em {
+  font-style: italic;
+}
+
+.cell-richtext u {
+  text-decoration: underline;
+}
+
+.cell-richtext s,
+.cell-richtext strike,
+.cell-richtext del {
+  text-decoration: line-through;
+}
+
+.cell-richtext blockquote {
+  border-left: 3px solid var(--border-color);
+  padding-left: 12px;
+  margin: 0.5em 0;
+  color: var(--text-secondary);
+}
+
+.cell-richtext pre,
+.cell-richtext code {
+  font-family: var(--font-mono);
+  background: var(--bg-secondary);
+  border-radius: 3px;
+}
+
+.cell-richtext code {
+  padding: 2px 4px;
+  font-size: 0.9em;
+}
+
+.cell-richtext pre {
+  padding: 8px 12px;
+  margin: 0.5em 0;
+  overflow-x: auto;
+}
+
+.cell-richtext pre code {
+  padding: 0;
+  background: none;
+}
+
+.cell-richtext h1,
+.cell-richtext h2,
+.cell-richtext h3,
+.cell-richtext h4,
+.cell-richtext h5,
+.cell-richtext h6 {
+  margin: 0.5em 0 0.25em;
+  font-weight: 600;
+}
+
+.cell-richtext h1 { font-size: 1.5em; }
+.cell-richtext h2 { font-size: 1.3em; }
+.cell-richtext h3 { font-size: 1.1em; }
+
+.cell-richtext table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+}
+
+.cell-richtext th,
+.cell-richtext td {
+  border: 1px solid var(--border-color);
+  padding: 4px 8px;
+}
+
+.cell-richtext th {
+  background: var(--bg-secondary);
+  font-weight: 600;
+}
+
+.cell-richtext hr {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 1em 0;
+}
+
 /* Code Cell */
 .cell-code {
   background: var(--bg-secondary);
   border-radius: 6px;
   overflow: hidden;
   border: 1px solid var(--border-color);
+  margin: 4px 0;
 }
 
 .monaco-container {
@@ -745,7 +862,7 @@ body {
 .markdown-preview {
   font-size: var(--font-size-lg);
   line-height: 1.5;
-  padding: 6px 10px;
+  padding: 12px 16px;
   border: 1px solid transparent;
   border-radius: 6px;
   cursor: text;
@@ -786,7 +903,7 @@ body {
 
 /* LaTeX Cell */
 .latex-preview {
-  padding: 6px 10px;
+  padding: 12px 16px;
   border: 1px solid transparent;
   border-radius: 6px;
   text-align: center;
@@ -805,7 +922,7 @@ body {
 
 /* Diagram Cell */
 .diagram-preview {
-  padding: 8px 0;
+  padding: 12px 16px;
   display: flex;
   justify-content: center;
 }
