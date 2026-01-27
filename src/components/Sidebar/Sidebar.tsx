@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useStore, useNotebooks, useTags } from '../../store';
-import type { SpecialCollection } from '../../types';
+import type { Notebook, SpecialCollection } from '../../types';
 
 interface NoteCounts {
   inbox: number;
@@ -28,12 +28,177 @@ const libraryItems: { id: SpecialCollection; name: string }[] = [
   { id: 'all', name: 'All Notes' },
 ];
 
+// Build a tree structure from flat notebook list
+interface NotebookNode extends Notebook {
+  children: NotebookNode[];
+}
+
+function buildNotebookTree(notebooks: Notebook[]): NotebookNode[] {
+  const map = new Map<string, NotebookNode>();
+  const roots: NotebookNode[] = [];
+
+  // Create nodes
+  for (const notebook of notebooks) {
+    map.set(notebook.id, { ...notebook, children: [] });
+  }
+
+  // Build tree
+  for (const notebook of notebooks) {
+    const node = map.get(notebook.id)!;
+    if (notebook.parentId && map.has(notebook.parentId)) {
+      map.get(notebook.parentId)!.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  // Sort children by sortOrder, then name
+  const sortNodes = (nodes: NotebookNode[]) => {
+    nodes.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    for (const node of nodes) {
+      sortNodes(node.children);
+    }
+  };
+  sortNodes(roots);
+
+  return roots;
+}
+
+// Chevron icon for expandable notebooks
+const ChevronIcon = ({ expanded }: { expanded: boolean }) => (
+  <svg
+    width="12"
+    height="12"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    style={{
+      transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+      transition: 'transform 0.15s ease',
+    }}
+  >
+    <polyline points="9 18 15 12 9 6" />
+  </svg>
+);
+
+// Recursive component for rendering nested notebooks
+interface NotebookTreeItemProps {
+  node: NotebookNode;
+  depth: number;
+  selectedNotebookId: string | null;
+  counts: Record<string, number>;
+  expandedIds: Set<string>;
+  onToggleExpand: (id: string) => void;
+  onSelect: (id: string) => void;
+  onContextMenu: (e: React.MouseEvent, id: string) => void;
+  // For inline input
+  newNotebookParentId: string | null;
+  showNewInput: boolean;
+  newItemName: string;
+  onNewItemNameChange: (name: string) => void;
+  onCreateItem: () => void;
+  onCancelCreate: () => void;
+}
+
+function NotebookTreeItem({
+  node,
+  depth,
+  selectedNotebookId,
+  counts,
+  expandedIds,
+  onToggleExpand,
+  onSelect,
+  onContextMenu,
+  newNotebookParentId,
+  showNewInput,
+  newItemName,
+  onNewItemNameChange,
+  onCreateItem,
+  onCancelCreate,
+}: NotebookTreeItemProps) {
+  const hasChildren = node.children.length > 0;
+  const isExpanded = expandedIds.has(node.id);
+  const isSelected = selectedNotebookId === node.id;
+  const showInputHere = showNewInput && newNotebookParentId === node.id;
+
+  return (
+    <>
+      <div
+        className={`sidebar-item ${isSelected ? 'selected' : ''}`}
+        style={{ paddingLeft: `${8 + depth * 16}px` }}
+        onClick={() => onSelect(node.id)}
+        onContextMenu={(e) => onContextMenu(e, node.id)}
+      >
+        {hasChildren || showInputHere ? (
+          <span
+            className="notebook-expand-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleExpand(node.id);
+            }}
+          >
+            <ChevronIcon expanded={isExpanded || showInputHere} />
+          </span>
+        ) : (
+          <span className="notebook-expand-placeholder" />
+        )}
+        <span className="sidebar-item-name">{node.name}</span>
+        <span className="sidebar-item-count">{counts[node.id] || 0}</span>
+      </div>
+      {(hasChildren && isExpanded) || showInputHere ? (
+        <div className="notebook-children">
+          {node.children.map((child) => (
+            <NotebookTreeItem
+              key={child.id}
+              node={child}
+              depth={depth + 1}
+              selectedNotebookId={selectedNotebookId}
+              counts={counts}
+              expandedIds={expandedIds}
+              onToggleExpand={onToggleExpand}
+              onSelect={onSelect}
+              onContextMenu={onContextMenu}
+              newNotebookParentId={newNotebookParentId}
+              showNewInput={showNewInput}
+              newItemName={newItemName}
+              onNewItemNameChange={onNewItemNameChange}
+              onCreateItem={onCreateItem}
+              onCancelCreate={onCancelCreate}
+            />
+          ))}
+          {showInputHere && (
+            <input
+              className="inline-input"
+              style={{ marginLeft: `${8 + (depth + 1) * 16}px`, width: `calc(100% - ${16 + (depth + 1) * 16}px)` }}
+              type="text"
+              value={newItemName}
+              onChange={e => onNewItemNameChange(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') onCreateItem();
+                if (e.key === 'Escape') onCancelCreate();
+              }}
+              onBlur={() => {
+                if (!newItemName.trim()) onCancelCreate();
+              }}
+              placeholder="Notebook name..."
+              autoFocus
+            />
+          )}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 export default function Sidebar() {
   const [activeTab, setActiveTab] = useState<'notebooks' | 'tags'>('notebooks');
   const [newItemName, setNewItemName] = useState('');
   const [showNewInput, setShowNewInput] = useState(false);
   const [filterText, setFilterText] = useState('');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; notebookId: string } | null>(null);
+  const [expandedNotebooks, setExpandedNotebooks] = useState<Set<string>>(new Set());
+  const [newNotebookParentId, setNewNotebookParentId] = useState<string | null>(null);
 
   const notebooks = useNotebooks();
   const tags = useTags();
@@ -65,12 +230,6 @@ export default function Sidebar() {
     }, {} as Record<string, number>),
   };
 
-  // Filter notebooks
-  const filteredNotebooks = notebooks.filter(nb =>
-    nb.name !== 'Inbox' &&
-    nb.name.toLowerCase().includes(filterText.toLowerCase())
-  );
-
   // Filter tags
   const filteredTags = tags.filter(tag =>
     tag.name.toLowerCase().includes(filterText.toLowerCase())
@@ -79,12 +238,16 @@ export default function Sidebar() {
   const handleCreateItem = async () => {
     if (newItemName.trim()) {
       if (activeTab === 'notebooks') {
-        await createNotebook(newItemName.trim());
+        await createNotebook(newItemName.trim(), newNotebookParentId ?? undefined);
+        if (newNotebookParentId) {
+          setExpandedNotebooks(prev => new Set([...prev, newNotebookParentId]));
+        }
       } else {
         await createTag(newItemName.trim());
       }
       setNewItemName('');
       setShowNewInput(false);
+      setNewNotebookParentId(null);
     }
   };
 
@@ -106,6 +269,31 @@ export default function Sidebar() {
       setContextMenu(null);
     }
   };
+
+  const handleCreateSubNotebook = () => {
+    if (contextMenu) {
+      setNewNotebookParentId(contextMenu.notebookId);
+      setShowNewInput(true);
+      setContextMenu(null);
+    }
+  };
+
+  const toggleNotebookExpanded = (id: string) => {
+    setExpandedNotebooks(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  // Build notebook tree for hierarchical display
+  const notebookTree = buildNotebookTree(
+    notebooks.filter(nb => nb.name !== 'Inbox' && nb.name.toLowerCase().includes(filterText.toLowerCase()))
+  );
 
   // Close context menu on click outside
   useEffect(() => {
@@ -157,18 +345,30 @@ export default function Sidebar() {
             <div className="sidebar-section-header">Notebooks</div>
           </div>
           <div className="notebooks-list">
-            {filteredNotebooks.map(notebook => (
-              <div
-                key={notebook.id}
-                className={`sidebar-item ${selectedNotebookId === notebook.id ? 'selected' : ''}`}
-                onClick={() => selectNotebook(notebook.id)}
-                onContextMenu={(e) => handleContextMenu(e, notebook.id)}
-              >
-                <span className="sidebar-item-name">{notebook.name}</span>
-                <span className="sidebar-item-count">{counts.notebooks[notebook.id] || 0}</span>
-              </div>
+            {notebookTree.map(node => (
+              <NotebookTreeItem
+                key={node.id}
+                node={node}
+                depth={0}
+                selectedNotebookId={selectedNotebookId}
+                counts={counts.notebooks}
+                expandedIds={expandedNotebooks}
+                onToggleExpand={toggleNotebookExpanded}
+                onSelect={selectNotebook}
+                onContextMenu={handleContextMenu}
+                newNotebookParentId={newNotebookParentId}
+                showNewInput={showNewInput}
+                newItemName={newItemName}
+                onNewItemNameChange={setNewItemName}
+                onCreateItem={handleCreateItem}
+                onCancelCreate={() => {
+                  setShowNewInput(false);
+                  setNewItemName('');
+                  setNewNotebookParentId(null);
+                }}
+              />
             ))}
-            {showNewInput && (
+            {showNewInput && !newNotebookParentId && (
               <input
                 className="inline-input"
                 type="text"
@@ -233,7 +433,10 @@ export default function Sidebar() {
       <div className="sidebar-footer">
         <button
           className="sidebar-add-btn"
-          onClick={() => setShowNewInput(true)}
+          onClick={() => {
+            setNewNotebookParentId(null);
+            setShowNewInput(true);
+          }}
           title={activeTab === 'notebooks' ? 'New Notebook' : 'New Tag'}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -264,6 +467,9 @@ export default function Sidebar() {
         >
           <div className="context-menu-item" onClick={handleNewNoteInNotebook}>
             New Note
+          </div>
+          <div className="context-menu-item" onClick={handleCreateSubNotebook}>
+            New Notebook
           </div>
           <div className="context-menu-separator" />
           <div className="context-menu-item" onClick={handleDeleteNotebook}>

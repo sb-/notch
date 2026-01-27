@@ -189,6 +189,42 @@ body {
   padding-bottom: 8px;
 }
 
+/* Notebook Tree */
+.notebook-expand-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 4px;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.notebook-expand-btn:hover {
+  color: var(--text-primary);
+}
+
+.sidebar-item.selected .notebook-expand-btn {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.sidebar-item.selected .notebook-expand-btn:hover {
+  color: rgba(255, 255, 255, 1);
+}
+
+.notebook-expand-placeholder {
+  width: 16px;
+  height: 16px;
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+
+.notebook-children {
+  /* Children inherit indentation from padding-left in NotebookTreeItem */
+}
+
 /* Sidebar Footer */
 .sidebar-footer {
   padding: 8px;
