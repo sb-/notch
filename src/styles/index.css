@@ -1093,6 +1093,15 @@ body {
   margin: 4px 0;
 }
 
+.context-menu-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 999;
+}
+
 /* Cell Type Menu */
 .cell-type-menu {
   position: absolute;

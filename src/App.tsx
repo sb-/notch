@@ -3,6 +3,7 @@ import { open, message, ask } from '@tauri-apps/plugin-dialog';
 import { useStore, useLayoutMode, useSidebarVisible } from './store';
 import { importQuiverLibrary, scanForDuplicates, type ImportProgress } from './services/import';
 import { exportNoteToMarkdown, exportNoteToHTML, exportNoteToJSON, saveToFile } from './services/export';
+import { getNoteBySourceUuid, getNote } from './services/database';
 import Sidebar from './components/Sidebar/Sidebar';
 import NoteList from './components/NoteList/NoteList';
 import NoteEditor from './components/Editor/NoteEditor';
@@ -197,8 +198,110 @@ export default function App() {
   }, [loadData]);
 
   useEffect(() => {
+    // Intercept all clicks on note links at document level with capture
+    const handleLinkClick = async (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      // Walk up to find anchor - could be clicking on text inside the anchor
+      let anchor: HTMLAnchorElement | null = null;
+      let el: HTMLElement | null = target;
+      while (el && !anchor) {
+        if (el.tagName === 'A') {
+          anchor = el as HTMLAnchorElement;
+        }
+        el = el.parentElement;
+      }
+
+      if (!anchor) return;
+
+      const href = anchor.getAttribute('href');
+      if (!href) return;
+
+      console.log('Link clicked:', href, 'target:', target.tagName, 'anchor:', anchor);
+
+      // Check for Quiver note links
+      if (href.startsWith('quiver-note-url://') || href.startsWith('quiver-note-url:')) {
+        e.preventDefault();
+        e.stopPropagation();
+        const uuid = href.replace(/^quiver-note-url:\/?\/?/, '');
+        console.log('Quiver link, UUID:', uuid);
+        const note = await getNoteBySourceUuid(uuid);
+        console.log('Found note:', note?.id, note?.title);
+        if (note) {
+          const state = useStore.getState();
+          state.selectNotebook(note.notebookId);
+          state.selectNote(note.id);
+        }
+        return;
+      }
+
+      // Check for Notch note links
+      if (href.startsWith('notch://note/')) {
+        e.preventDefault();
+        e.stopPropagation();
+        const noteId = href.replace('notch://note/', '');
+        console.log('Notch link, noteId:', noteId);
+        // Look up note from database (not store, which may be filtered by notebook)
+        const note = await getNote(noteId);
+        console.log('Found note:', note?.id, note?.title);
+        if (note) {
+          const state = useStore.getState();
+          // Select the notebook first (this loads that notebook's notes)
+          await state.selectNotebook(note.notebookId);
+          // Then select the note
+          state.selectNote(note.id);
+        } else {
+          console.log('Note not found in database');
+        }
+        return;
+      }
+    };
+
+    // Handle custom navigation event from TextCell
+    const handleCustomNavigate = async (e: Event) => {
+      const { href } = (e as CustomEvent).detail;
+      console.log('Custom navigate event:', href);
+
+      if (href.startsWith('quiver-note-url://') || href.startsWith('quiver-note-url:')) {
+        const uuid = href.replace(/^quiver-note-url:\/?\/?/, '');
+        const note = await getNoteBySourceUuid(uuid);
+        if (note) {
+          const state = useStore.getState();
+          await state.selectNotebook(note.notebookId);
+          state.selectNote(note.id);
+        }
+      } else if (href.startsWith('notch://note/')) {
+        const noteId = href.replace('notch://note/', '');
+        const note = await getNote(noteId);
+        if (note) {
+          const state = useStore.getState();
+          await state.selectNotebook(note.notebookId);
+          state.selectNote(note.id);
+        }
+      }
+    };
+
+    document.addEventListener('click', handleLinkClick, true);
+    window.addEventListener('notch-navigate', handleCustomNavigate);
+    return () => {
+      document.removeEventListener('click', handleLinkClick, true);
+      window.removeEventListener('notch-navigate', handleCustomNavigate);
+    };
+  }, []);
+
+  useEffect(() => {
     // Setup keyboard shortcuts
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Cmd+Z: Undo (let browser handle it for contentEditable)
+      if (e.metaKey && e.key === 'z' && !e.shiftKey) {
+        // Don't prevent default - let browser handle undo
+        document.execCommand('undo');
+        return;
+      }
+      // Cmd+Shift+Z: Redo
+      if (e.metaKey && e.key === 'z' && e.shiftKey) {
+        document.execCommand('redo');
+        return;
+      }
       // Cmd+1: Single pane mode
       if (e.metaKey && e.key === '1') {
         e.preventDefault();

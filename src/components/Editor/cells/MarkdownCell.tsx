@@ -12,11 +12,16 @@ interface MarkdownCellProps {
   onNavigateNext?: () => void;
 }
 
-// Configure marked with highlight.js and custom code renderer
+// Configure marked with highlight.js and custom renderers
 marked.use({
   gfm: true,
   breaks: true,
   renderer: {
+    // Custom link renderer to preserve notch:// and quiver-note-url:// protocols
+    link(href: string, title: string | null, text: string) {
+      const titleAttr = title ? ` title="${title}"` : '';
+      return `<a href="${href}"${titleAttr}>${text}</a>`;
+    },
     code(code: string, infostring?: string) {
       const lang = infostring || '';
       if (lang && hljs.getLanguage(lang)) {
@@ -62,7 +67,16 @@ export default function MarkdownCell({ data, onChange, onFocus, isFocused, onBac
     wasEditing.current = isEditing;
   }, [isFocused, isEditing]);
 
-  const handleClick = () => {
+  const handleClick = (e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    const anchor = target.closest('a');
+
+    // If clicked on a link, don't enter edit mode - let App.tsx handle navigation
+    if (anchor) {
+      return;
+    }
+
+    // Not a link click, enter edit mode
     setIsEditing(true);
     onFocus();
   };

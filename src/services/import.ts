@@ -408,8 +408,8 @@ async function importQuiverNote(notePath: string, notebookId: string): Promise<v
   const contentStr = await readTextFile(contentPath);
   const content: QuiverNoteContent = JSON.parse(sanitizeJsonString(contentStr));
 
-  // Create the note
-  const note = await db.createNote(notebookId, content.title || meta.title);
+  // Create the note with the original Quiver UUID for cross-reference links
+  const note = await db.createNote(notebookId, content.title || meta.title, meta.uuid);
 
   // Delete the default cell that was created
   const existingCells = await db.getCellsByNote(note.id);

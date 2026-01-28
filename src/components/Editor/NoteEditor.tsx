@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { useStore, useSelectedNote, useEditorViewMode, useNotebooks } from '../../store';
 import CellContainer from './CellContainer';
 import NotePreview from '../Preview/NotePreview';
+import { copyNoteLink } from '../NoteList/NoteListItem';
 import type { CellType, EditorViewMode } from '../../types';
 
 const cellTypes: { type: CellType; label: string }[] = [
@@ -385,13 +386,14 @@ export default function NoteEditor() {
             <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
           </svg>
         </button>
-        <button className="editor-footer-btn" title="Share">
+        <button
+          className="editor-footer-btn"
+          title="Copy Note Link"
+          onClick={() => copyNoteLink(note.id, note.title)}
+        >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <circle cx="18" cy="5" r="3"/>
-            <circle cx="6" cy="12" r="3"/>
-            <circle cx="18" cy="19" r="3"/>
-            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/>
-            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
           </svg>
         </button>
         <button className="editor-footer-btn" title="More Options">

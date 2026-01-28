@@ -19,6 +19,8 @@ const sanitizeConfig: DOMPurify.Config = {
   ],
   ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'style'],
   ALLOW_DATA_ATTR: false,
+  // Allow custom protocols for internal links
+  ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|notch|quiver-note-url):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
 };
 
 interface NotePreviewProps {
@@ -38,6 +40,11 @@ marked.use({
   gfm: true,
   breaks: true,
   renderer: {
+    // Custom link renderer to preserve notch:// and quiver-note-url:// protocols
+    link(href: string, title: string | null, text: string) {
+      const titleAttr = title ? ` title="${title}"` : '';
+      return `<a href="${href}"${titleAttr}>${text}</a>`;
+    },
     code(code: string, infostring?: string) {
       const lang = infostring || '';
       let highlighted = code;

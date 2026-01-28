@@ -24,6 +24,8 @@ const sanitizeConfig: DOMPurify.Config = {
   ],
   ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'style'],
   ALLOW_DATA_ATTR: false,
+  // Allow custom protocols for internal links
+  ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|notch|quiver-note-url):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
 };
 
 function sanitizeHtml(html: string): string {
@@ -121,6 +123,37 @@ export default function TextCell({
     const text = e.clipboardData.getData('text/plain');
     const content = html ? sanitizeHtml(html) : text;
     document.execCommand('insertHTML', false, content);
+  }, []);
+
+  // Use native event listener for link clicks - React events don't work well with contentEditable
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    const handleLinkClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      // Walk up to find anchor
+      let el: HTMLElement | null = target;
+      while (el && el !== editor) {
+        if (el.tagName === 'A') {
+          const href = el.getAttribute('href');
+          console.log('TextCell native click on link:', href);
+          if (href && (href.startsWith('notch://') || href.startsWith('quiver-note-url'))) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            console.log('TextCell: Dispatching navigate event for:', href);
+            window.dispatchEvent(new CustomEvent('notch-navigate', { detail: { href } }));
+          }
+          return;
+        }
+        el = el.parentElement;
+      }
+    };
+
+    // Use capture phase to get event before contentEditable
+    editor.addEventListener('click', handleLinkClick, true);
+    return () => editor.removeEventListener('click', handleLinkClick, true);
   }, []);
 
   return (

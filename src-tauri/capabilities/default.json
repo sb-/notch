@@ -34,6 +34,8 @@
     "sql:allow-load",
     "sql:allow-execute",
     "sql:allow-select",
-    "sql:allow-close"
+    "sql:allow-close",
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-read-text"
   ]
 }

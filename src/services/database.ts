@@ -41,9 +41,20 @@ export async function initDatabase(): Promise<void> {
       sort_order INTEGER,
       created_at INTEGER,
       updated_at INTEGER,
+      source_uuid TEXT,
       FOREIGN KEY (notebook_id) REFERENCES notebooks(id)
     )
   `);
+
+  // Add source_uuid column if it doesn't exist (migration for existing DBs)
+  try {
+    await db.execute(`ALTER TABLE notes ADD COLUMN source_uuid TEXT`);
+  } catch {
+    // Column already exists
+  }
+
+  // Create index for source_uuid lookups
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_notes_source_uuid ON notes(source_uuid)`);
 
   await db.execute(`
     CREATE TABLE IF NOT EXISTS cells (
@@ -135,6 +146,7 @@ function rowToNote(row: NoteRow, cells: Cell[] = [], tags: string[] = []): Note 
     sortOrder: row.sort_order,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    sourceUuid: row.source_uuid ?? undefined,
   };
 }
 
@@ -325,7 +337,20 @@ export async function getNote(id: string): Promise<Note | null> {
   return rowToNote(rows[0], cells, tags);
 }
 
-export async function createNote(notebookId: string, title = 'Untitled'): Promise<Note> {
+export async function getNoteBySourceUuid(sourceUuid: string): Promise<Note | null> {
+  const rows = await getDb().select<NoteRow[]>(
+    'SELECT * FROM notes WHERE source_uuid = ?',
+    [sourceUuid]
+  );
+
+  if (rows.length === 0) return null;
+
+  const cells = await getCellsByNote(rows[0].id);
+  const tags = await getTagsForNote(rows[0].id);
+  return rowToNote(rows[0], cells, tags);
+}
+
+export async function createNote(notebookId: string, title = 'Untitled', sourceUuid?: string): Promise<Note> {
   const id = uuid();
   const now = Date.now();
 
@@ -337,9 +362,9 @@ export async function createNote(notebookId: string, title = 'Untitled'): Promis
   const sortOrder = (maxResult[0]?.max_order ?? -1) + 1;
 
   await getDb().execute(
-    `INSERT INTO notes (id, notebook_id, title, is_favorite, is_trashed, sort_order, created_at, updated_at)
-     VALUES (?, ?, ?, 0, 0, ?, ?, ?)`,
-    [id, notebookId, title, sortOrder, now, now]
+    `INSERT INTO notes (id, notebook_id, title, is_favorite, is_trashed, sort_order, created_at, updated_at, source_uuid)
+     VALUES (?, ?, ?, 0, 0, ?, ?, ?, ?)`,
+    [id, notebookId, title, sortOrder, now, now, sourceUuid ?? null]
   );
 
   // Create a default markdown cell
@@ -356,6 +381,7 @@ export async function createNote(notebookId: string, title = 'Untitled'): Promis
     sortOrder,
     createdAt: now,
     updatedAt: now,
+    sourceUuid,
   };
 }
 
@@ -578,12 +604,129 @@ export async function moveCell(
   );
 }
 
+// Convert HTML to Markdown
+function htmlToMarkdown(html: string): string {
+  let md = html;
+
+  // First, handle nested formatting by processing from inside out
+  // Convert links: <a href="url" ...>content</a> -> [content](url)
+  // Also handle links without href (just extract text)
+  md = md.replace(/<a\s+[^>]*>([\s\S]*?)<\/a>/gi, (match, content) => {
+    // Try to extract href
+    const hrefMatch = match.match(/href="([^"]*)"/i);
+    const href = hrefMatch ? hrefMatch[1] : null;
+    // Strip any HTML tags from the link content
+    const cleanContent = content.replace(/<[^>]+>/g, '').trim();
+
+    if (href && cleanContent) {
+      return `[${cleanContent}](${href})`;
+    } else {
+      // No href or no content, just return the text
+      return cleanContent;
+    }
+  });
+
+  // Convert bold: <strong ...> or <b ...> -> **
+  md = md.replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, '**$2**');
+
+  // Convert italic: <em ...> or <i ...> -> *
+  md = md.replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, '*$2*');
+
+  // Convert underline: <u ...> -> just text (markdown doesn't support underline)
+  md = md.replace(/<u\b[^>]*>([\s\S]*?)<\/u>/gi, '$1');
+
+  // Convert strikethrough: <s>, <strike>, <del> -> ~~
+  md = md.replace(/<(s|strike|del)\b[^>]*>([\s\S]*?)<\/\1>/gi, '~~$2~~');
+
+  // Convert code: <code ...> -> `
+  md = md.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, '`$1`');
+
+  // Convert pre blocks
+  md = md.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, '\n```\n$1\n```\n');
+
+  // Convert headings (with any attributes)
+  md = md.replace(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi, (_, content) => `# ${content.replace(/<[^>]+>/g, '').trim()}\n`);
+  md = md.replace(/<h2\b[^>]*>([\s\S]*?)<\/h2>/gi, (_, content) => `## ${content.replace(/<[^>]+>/g, '').trim()}\n`);
+  md = md.replace(/<h3\b[^>]*>([\s\S]*?)<\/h3>/gi, (_, content) => `### ${content.replace(/<[^>]+>/g, '').trim()}\n`);
+  md = md.replace(/<h4\b[^>]*>([\s\S]*?)<\/h4>/gi, (_, content) => `#### ${content.replace(/<[^>]+>/g, '').trim()}\n`);
+  md = md.replace(/<h5\b[^>]*>([\s\S]*?)<\/h5>/gi, (_, content) => `##### ${content.replace(/<[^>]+>/g, '').trim()}\n`);
+  md = md.replace(/<h6\b[^>]*>([\s\S]*?)<\/h6>/gi, (_, content) => `###### ${content.replace(/<[^>]+>/g, '').trim()}\n`);
+
+  // Convert line breaks
+  md = md.replace(/<br\s*\/?>/gi, '\n');
+
+  // Convert blockquotes
+  md = md.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_, content) => {
+    const lines = content.replace(/<[^>]+>/g, '').trim().split('\n');
+    return lines.map((line: string) => `> ${line}`).join('\n') + '\n';
+  });
+
+  // Convert unordered lists
+  md = md.replace(/<ul\b[^>]*>([\s\S]*?)<\/ul>/gi, (_, content) => {
+    return content.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_: string, item: string) => {
+      return `- ${item.replace(/<[^>]+>/g, '').trim()}\n`;
+    });
+  });
+
+  // Convert ordered lists
+  let listCounter = 0;
+  md = md.replace(/<ol\b[^>]*>([\s\S]*?)<\/ol>/gi, (_, content) => {
+    listCounter = 0;
+    return content.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_: string, item: string) => {
+      listCounter++;
+      return `${listCounter}. ${item.replace(/<[^>]+>/g, '').trim()}\n`;
+    });
+  });
+
+  // Convert horizontal rules
+  md = md.replace(/<hr\b[^>]*\/?>/gi, '\n---\n');
+
+  // Convert paragraphs - extract content and add newlines
+  md = md.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, (_, content) => {
+    const clean = content.replace(/<[^>]+>/g, '').trim();
+    return clean ? clean + '\n\n' : '';
+  });
+
+  // Convert divs to newlines
+  md = md.replace(/<div\b[^>]*>([\s\S]*?)<\/div>/gi, '$1\n');
+
+  // Remove any remaining HTML tags
+  md = md.replace(/<[^>]+>/g, '');
+
+  // Decode HTML entities
+  md = md.replace(/&amp;/g, '&');
+  md = md.replace(/&lt;/g, '<');
+  md = md.replace(/&gt;/g, '>');
+  md = md.replace(/&quot;/g, '"');
+  md = md.replace(/&#39;/g, "'");
+  md = md.replace(/&nbsp;/g, ' ');
+  md = md.replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)));
+
+  // Clean up whitespace
+  md = md.replace(/[ \t]+$/gm, ''); // Trailing spaces
+  md = md.replace(/\n{3,}/g, '\n\n'); // Multiple newlines
+  md = md.trim();
+
+  return md;
+}
+
 export async function convertCell(
   noteId: string,
   cellId: string,
   newType: CellType
 ): Promise<void> {
+  // Get current cell to check its type and data
+  const cells = await getCellsByNote(noteId);
+  const currentCell = cells.find(c => c.id === cellId);
+  const currentType = currentCell?.type;
+  const currentData = currentCell?.data || '';
+
   const updates: Partial<Cell> = { type: newType };
+
+  // Convert content between text (HTML) and markdown
+  if (currentType === 'text' && newType === 'markdown') {
+    updates.data = htmlToMarkdown(currentData);
+  }
 
   // Set appropriate defaults for the new type
   if (newType === 'code') {

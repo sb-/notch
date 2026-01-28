@@ -26,6 +26,7 @@ export interface Note {
   sortOrder: number;
   createdAt: number;
   updatedAt: number;
+  sourceUuid?: string; // Original UUID from imported notes (e.g., Quiver)
 }
 
 // Notebook is a container for notes
@@ -162,6 +163,7 @@ export interface NoteRow {
   sort_order: number;
   created_at: number;
   updated_at: number;
+  source_uuid: string | null;
 }
 
 export interface CellRow {
