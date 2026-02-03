@@ -52,62 +52,74 @@ export const useStore = create<Store>((set, get) => ({
   // ==================== SELECTION ACTIONS ====================
 
   selectNotebook: async (id: string | null) => {
+    const allNotes = get().notes;
+    const notesInNotebook = id ? allNotes.filter(n => n.notebookId === id && !n.isTrashed) : [];
     set({
       selectedNotebookId: id,
       selectedCollection: null,
       selectedTagId: null,
+      selectedNoteId: notesInNotebook[0]?.id ?? null,
     });
-
-    if (id) {
-      const notes = await db.getNotesByNotebook(id);
-      set({ notes, selectedNoteId: notes[0]?.id ?? null });
-    }
   },
 
   selectNote: (id: string | null) => set({ selectedNoteId: id }),
 
   selectCollection: async (collection: SpecialCollection | null) => {
+    const state = get();
+    const allNotes = state.notes;
+    const notebooks = state.notebooks;
+
+    let filteredNotes: Note[] = [];
+    if (collection) {
+      switch (collection) {
+        case 'all':
+          filteredNotes = allNotes.filter(n => !n.isTrashed);
+          break;
+        case 'favorites':
+          filteredNotes = allNotes.filter(n => n.isFavorite && !n.isTrashed);
+          break;
+        case 'recents':
+          filteredNotes = allNotes
+            .filter(n => !n.isTrashed)
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .slice(0, 50);
+          break;
+        case 'trash':
+          filteredNotes = allNotes.filter(n => n.isTrashed);
+          break;
+        case 'inbox':
+          const inbox = notebooks.find(nb => nb.name === 'Inbox');
+          if (inbox) {
+            filteredNotes = allNotes.filter(n => n.notebookId === inbox.id && !n.isTrashed);
+          }
+          break;
+      }
+    }
+
     set({
       selectedCollection: collection,
       selectedNotebookId: null,
       selectedTagId: null,
+      selectedNoteId: filteredNotes[0]?.id ?? null,
     });
-
-    if (collection) {
-      let notes: Note[] = [];
-      switch (collection) {
-        case 'all':
-          notes = await db.getAllNotes();
-          break;
-        case 'favorites':
-          notes = await db.getFavoriteNotes();
-          break;
-        case 'recents':
-          notes = await db.getRecentNotes();
-          break;
-        case 'trash':
-          notes = await db.getTrashedNotes();
-          break;
-        case 'inbox':
-          const inbox = await db.ensureInboxNotebook();
-          notes = await db.getNotesByNotebook(inbox.id);
-          break;
-      }
-      set({ notes, selectedNoteId: notes[0]?.id ?? null });
-    }
   },
 
   selectTag: async (id: string | null) => {
+    const state = get();
+    const allNotes = state.notes;
+    const tag = state.tags.find(t => t.id === id);
+
+    let filteredNotes: Note[] = [];
+    if (tag) {
+      filteredNotes = allNotes.filter(n => n.tags.includes(tag.name) && !n.isTrashed);
+    }
+
     set({
       selectedTagId: id,
       selectedNotebookId: null,
       selectedCollection: null,
+      selectedNoteId: filteredNotes[0]?.id ?? null,
     });
-
-    if (id) {
-      const notes = await db.getNotesByTag(id);
-      set({ notes, selectedNoteId: notes[0]?.id ?? null });
-    }
   },
 
   // ==================== NOTEBOOK ACTIONS ====================

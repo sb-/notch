@@ -40,6 +40,9 @@ fn main() {
                 "export" => {
                     let _ = window.eval("window.__NOTCH__.exportNote()");
                 }
+                "export_library" => {
+                    let _ = window.eval("window.__NOTCH__.exportLibrary()");
+                }
                 "toggle_sidebar" => {
                     let _ = window.eval("window.__NOTCH__.toggleSidebar()");
                 }
@@ -98,6 +101,7 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(handle, "import", "Import Quiver Library...", true, Some("CmdOrCtrl+Shift+I"))?,
             &MenuItem::with_id(handle, "export", "Export Note...", true, Some("CmdOrCtrl+Shift+E"))?,
+            &MenuItem::with_id(handle, "export_library", "Export Library...", true, None::<&str>)?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::close_window(handle, None)?,
         ],

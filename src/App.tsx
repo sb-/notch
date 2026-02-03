@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { open, message, ask } from '@tauri-apps/plugin-dialog';
+import { open, save, message, ask } from '@tauri-apps/plugin-dialog';
 import { useStore, useLayoutMode, useSidebarVisible } from './store';
 import { importQuiverLibrary, scanForDuplicates, type ImportProgress } from './services/import';
-import { exportNoteToMarkdown, exportNoteToHTML, exportNoteToJSON, saveToFile } from './services/export';
+import { exportNoteToMarkdown, exportNoteToHTML, exportNoteToJSON, exportLibraryToJSON, saveToFile } from './services/export';
 import { getNoteBySourceUuid, getNote } from './services/database';
 import Sidebar from './components/Sidebar/Sidebar';
 import NoteList from './components/NoteList/NoteList';
@@ -17,6 +17,7 @@ declare global {
       newNotebook: () => void;
       importLibrary: () => void;
       exportNote: () => void;
+      exportLibrary: () => void;
       toggleSidebar: () => void;
       setLayoutMode: (mode: LayoutMode) => void;
       setEditorViewMode: (mode: EditorViewMode) => void;
@@ -152,37 +153,55 @@ export default function App() {
         const state = useStore.getState();
         const note = state.notes.find(n => n.id === state.selectedNoteId);
         if (!note) {
-          alert('No note selected');
+          await message('No note selected', { title: 'Export Note', kind: 'error' });
           return;
         }
 
-        const format = prompt('Export format (md/html/json):', 'md');
-        if (!format) return;
-
-        let content: string;
-        let extension: string;
-        switch (format.toLowerCase()) {
-          case 'html':
-            content = exportNoteToHTML(note);
-            extension = 'html';
-            break;
-          case 'json':
-            content = exportNoteToJSON(note);
-            extension = 'json';
-            break;
-          default:
-            content = exportNoteToMarkdown(note);
-            extension = 'md';
-        }
-
-        const savePath = await open({
-          directory: true,
-          title: 'Select export location',
+        const sanitizedTitle = note.title.replace(/[^a-zA-Z0-9\s-]/g, '_').trim() || 'untitled';
+        const savePath = await save({
+          title: 'Export Note',
+          defaultPath: `${sanitizedTitle}.md`,
+          filters: [
+            { name: 'Markdown', extensions: ['md'] },
+            { name: 'HTML', extensions: ['html'] },
+            { name: 'JSON', extensions: ['json'] },
+          ],
         });
+
         if (savePath) {
-          const fileName = `${note.title.replace(/[^a-zA-Z0-9]/g, '_')}.${extension}`;
-          await saveToFile(`${savePath}/${fileName}`, content);
-          alert(`Exported to ${fileName}`);
+          const extension = savePath.split('.').pop()?.toLowerCase() || 'md';
+          let content: string;
+          switch (extension) {
+            case 'html':
+              content = exportNoteToHTML(note);
+              break;
+            case 'json':
+              content = exportNoteToJSON(note);
+              break;
+            default:
+              content = exportNoteToMarkdown(note);
+          }
+          await saveToFile(savePath, content);
+          await message(`Exported to ${savePath.split('/').pop()}`, { title: 'Export Note' });
+        }
+      },
+      exportLibrary: async () => {
+        const savePath = await save({
+          title: 'Export Library',
+          defaultPath: 'notch-library.json',
+          filters: [
+            { name: 'JSON', extensions: ['json'] },
+          ],
+        });
+
+        if (savePath) {
+          try {
+            const content = await exportLibraryToJSON();
+            await saveToFile(savePath, content);
+            await message(`Library exported to ${savePath.split('/').pop()}`, { title: 'Export Library' });
+          } catch (err) {
+            await message(`Export failed: ${err}`, { title: 'Export Error', kind: 'error' });
+          }
         }
       },
       toggleSidebar: () => {

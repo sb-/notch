@@ -57,9 +57,38 @@ export default function NoteList() {
   const displayNotes = useMemo(() => {
     let filtered = notes;
 
-    // Filter based on selection
-    if (selectedCollection === 'trash') {
-      filtered = notes.filter(n => n.isTrashed);
+    // Filter based on current selection
+    if (selectedNotebookId) {
+      filtered = notes.filter(n => n.notebookId === selectedNotebookId && !n.isTrashed);
+    } else if (selectedTagId) {
+      const tag = tags.find(t => t.id === selectedTagId);
+      if (tag) {
+        filtered = notes.filter(n => n.tags.includes(tag.name) && !n.isTrashed);
+      }
+    } else if (selectedCollection) {
+      switch (selectedCollection) {
+        case 'all':
+          filtered = notes.filter(n => !n.isTrashed);
+          break;
+        case 'favorites':
+          filtered = notes.filter(n => n.isFavorite && !n.isTrashed);
+          break;
+        case 'recents':
+          filtered = notes
+            .filter(n => !n.isTrashed)
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .slice(0, 50);
+          break;
+        case 'trash':
+          filtered = notes.filter(n => n.isTrashed);
+          break;
+        case 'inbox':
+          const inbox = notebooks.find(nb => nb.name === 'Inbox');
+          if (inbox) {
+            filtered = notes.filter(n => n.notebookId === inbox.id && !n.isTrashed);
+          }
+          break;
+      }
     } else {
       filtered = notes.filter(n => !n.isTrashed);
     }
@@ -85,7 +114,7 @@ export default function NoteList() {
     });
 
     return sorted;
-  }, [notes, selectedCollection, sortBy, sortOrder]);
+  }, [notes, notebooks, tags, selectedNotebookId, selectedTagId, selectedCollection, sortBy, sortOrder]);
 
   const handleCreateNote = async () => {
     let notebookId = selectedNotebookId;
