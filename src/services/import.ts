@@ -258,6 +258,11 @@ export async function importQuiverLibrary(
 
         // Skip if duplicate and skipDuplicates is enabled
         if (skipDuplicates && existingNames.has(info.meta.name.toLowerCase())) {
+          // Map the Quiver UUID to the existing notebook's ID so children can still find their parent
+          const existing = existingNotebooks.find(n => n.name.toLowerCase() === info.meta.name.toLowerCase());
+          if (existing) {
+            uuidToNotebookId.set(info.meta.uuid, existing.id);
+          }
           result.notebooksSkipped++;
           progress.notebooksCompleted++;
           onProgress?.(progress);
