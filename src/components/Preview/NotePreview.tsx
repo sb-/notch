@@ -39,6 +39,10 @@ function addLineNumbers(code: string, highlighted: string): string {
 marked.use({
   gfm: true,
   breaks: true,
+  // Disable auto-linking of raw URLs - only explicit [text](url) links should work
+  tokenizer: {
+    url() { return undefined; },
+  },
   renderer: {
     // Custom link renderer to preserve notch:// and quiver-note-url:// protocols
     link(href: string, title: string | null, text: string) {

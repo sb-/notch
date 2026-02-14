@@ -1,6 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useStore, useNotebooks, useTags } from '../../store';
 import type { Notebook, SpecialCollection } from '../../types';
+
+// Helper to check if a notebook is a descendant of another
+function isDescendantOf(notebooks: Notebook[], potentialDescendantId: string, ancestorId: string): boolean {
+  let current = notebooks.find(n => n.id === potentialDescendantId);
+  while (current?.parentId) {
+    if (current.parentId === ancestorId) return true;
+    current = notebooks.find(n => n.id === current!.parentId);
+  }
+  return false;
+}
 
 interface NoteCounts {
   inbox: number;
@@ -99,6 +109,12 @@ interface NotebookTreeItemProps {
   onNewItemNameChange: (name: string) => void;
   onCreateItem: () => void;
   onCancelCreate: () => void;
+  // For drag-and-drop
+  dropTargetId: string | null;
+  onDragStart: (id: string) => void;
+  onDragOver: (e: React.DragEvent, id: string) => void;
+  onDrop: (targetId: string) => void;
+  onDragEnd: () => void;
 }
 
 function NotebookTreeItem({
@@ -116,19 +132,41 @@ function NotebookTreeItem({
   onNewItemNameChange,
   onCreateItem,
   onCancelCreate,
+  dropTargetId,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
 }: NotebookTreeItemProps) {
   const hasChildren = node.children.length > 0;
   const isExpanded = expandedIds.has(node.id);
   const isSelected = selectedNotebookId === node.id;
   const showInputHere = showNewInput && newNotebookParentId === node.id;
+  const isDropTarget = dropTargetId === node.id;
 
   return (
     <>
       <div
-        className={`sidebar-item ${isSelected ? 'selected' : ''}`}
+        className={`sidebar-item ${isSelected ? 'selected' : ''} ${isDropTarget ? 'drag-over' : ''}`}
         style={{ paddingLeft: `${8 + depth * 16}px` }}
         onClick={() => onSelect(node.id)}
         onContextMenu={(e) => onContextMenu(e, node.id)}
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData('text/plain', node.id);
+          e.dataTransfer.effectAllowed = 'move';
+          onDragStart(node.id);
+        }}
+        onDragOver={(e) => {
+          e.stopPropagation();
+          onDragOver(e, node.id);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onDrop(node.id);
+        }}
+        onDragEnd={onDragEnd}
       >
         {hasChildren || showInputHere ? (
           <span
@@ -165,6 +203,11 @@ function NotebookTreeItem({
               onNewItemNameChange={onNewItemNameChange}
               onCreateItem={onCreateItem}
               onCancelCreate={onCancelCreate}
+              dropTargetId={dropTargetId}
+              onDragStart={onDragStart}
+              onDragOver={onDragOver}
+              onDrop={onDrop}
+              onDragEnd={onDragEnd}
             />
           ))}
           {showInputHere && (
@@ -199,6 +242,9 @@ export default function Sidebar() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; notebookId: string } | null>(null);
   const [expandedNotebooks, setExpandedNotebooks] = useState<Set<string>>(new Set());
   const [newNotebookParentId, setNewNotebookParentId] = useState<string | null>(null);
+  const [showMoveSubmenu, setShowMoveSubmenu] = useState(false);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const draggedRef = useRef<string | null>(null);
 
   const notebooks = useNotebooks();
   const tags = useTags();
@@ -213,6 +259,7 @@ export default function Sidebar() {
   const createTag = useStore(state => state.createTag);
   const deleteNotebook = useStore(state => state.deleteNotebook);
   const createNote = useStore(state => state.createNote);
+  const updateNotebook = useStore(state => state.updateNotebook);
 
   // Calculate note counts
   const counts: NoteCounts = {
@@ -277,6 +324,84 @@ export default function Sidebar() {
       setContextMenu(null);
     }
   };
+
+  const handleMoveNotebook = async (targetParentId: string | null) => {
+    if (contextMenu) {
+      const notebookId = contextMenu.notebookId;
+      // Prevent moving to self or own descendants
+      if (targetParentId !== notebookId &&
+          (targetParentId === null || !isDescendantOf(notebooks, targetParentId, notebookId))) {
+        await updateNotebook(notebookId, { parentId: targetParentId ?? undefined });
+      }
+      setContextMenu(null);
+      setShowMoveSubmenu(false);
+    }
+  };
+
+  // Get valid move targets (exclude self, descendants, and Inbox)
+  const getMoveTargets = (notebookId: string) => {
+    return notebooks.filter(nb =>
+      nb.id !== notebookId &&
+      nb.name !== 'Inbox' &&
+      !isDescendantOf(notebooks, nb.id, notebookId)
+    );
+  };
+
+  // Drag-and-drop handlers — use ref for dragged ID to avoid re-renders
+  // that would destroy the DOM node the browser is dragging.
+  const handleDragStart = useCallback((id: string) => {
+    const notebook = notebooks.find(n => n.id === id);
+    if (notebook?.name === 'Inbox') return;
+    draggedRef.current = id;
+  }, [notebooks]);
+
+  const handleDragOver = useCallback((e: React.DragEvent, targetId: string) => {
+    const dragged = draggedRef.current;
+    if (!dragged || dragged === targetId) return;
+    if (isDescendantOf(notebooks, targetId, dragged)) return;
+    const targetNotebook = notebooks.find(n => n.id === targetId);
+    if (targetNotebook?.name === 'Inbox') return;
+
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDropTargetId(prev => prev === targetId ? prev : targetId);
+  }, [notebooks]);
+
+  const handleDrop = useCallback((targetId: string) => {
+    const dragged = draggedRef.current;
+    if (!dragged || dragged === targetId) return;
+    if (isDescendantOf(notebooks, targetId, dragged)) return;
+    const targetNotebook = notebooks.find(n => n.id === targetId);
+    if (targetNotebook?.name === 'Inbox') return;
+
+    draggedRef.current = null;
+    setDropTargetId(null);
+    setExpandedNotebooks(prev => new Set([...prev, targetId]));
+    updateNotebook(dragged, { parentId: targetId });
+  }, [notebooks, updateNotebook]);
+
+  const handleDragEnd = useCallback(() => {
+    draggedRef.current = null;
+    setDropTargetId(null);
+  }, []);
+
+  const handleDropOnRoot = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const dragged = draggedRef.current;
+    if (!dragged) return;
+    draggedRef.current = null;
+    setDropTargetId(null);
+    updateNotebook(dragged, { parentId: undefined });
+  }, [updateNotebook]);
+
+  const handleDragOverRoot = useCallback((e: React.DragEvent) => {
+    if (!draggedRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    setDropTargetId(prev => prev === '__root__' ? prev : '__root__');
+  }, []);
 
   const toggleNotebookExpanded = (id: string) => {
     setExpandedNotebooks(prev => {
@@ -344,7 +469,12 @@ export default function Sidebar() {
           <div className="sidebar-section">
             <div className="sidebar-section-header">Notebooks</div>
           </div>
-          <div className="notebooks-list">
+          <div
+            className={`notebooks-list ${dropTargetId === '__root__' ? 'drag-over-root' : ''}`}
+            onDragOver={handleDragOverRoot}
+            onDrop={handleDropOnRoot}
+            onDragLeave={() => setDropTargetId(null)}
+          >
             {notebookTree.map(node => (
               <NotebookTreeItem
                 key={node.id}
@@ -366,6 +496,11 @@ export default function Sidebar() {
                   setNewItemName('');
                   setNewNotebookParentId(null);
                 }}
+                dropTargetId={dropTargetId}
+                onDragStart={handleDragStart}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+                onDragEnd={handleDragEnd}
               />
             ))}
             {showNewInput && !newNotebookParentId && (
@@ -470,6 +605,36 @@ export default function Sidebar() {
           </div>
           <div className="context-menu-item" onClick={handleCreateSubNotebook}>
             New Notebook
+          </div>
+          <div
+            className="context-menu-item context-menu-item-with-submenu"
+            onMouseEnter={() => setShowMoveSubmenu(true)}
+            onMouseLeave={() => setShowMoveSubmenu(false)}
+          >
+            Move to...
+            <span className="context-menu-arrow">›</span>
+            {showMoveSubmenu && (
+              <div className="context-submenu">
+                <div
+                  className="context-menu-item"
+                  onClick={() => handleMoveNotebook(null)}
+                >
+                  Root level
+                </div>
+                {getMoveTargets(contextMenu.notebookId).length > 0 && (
+                  <div className="context-menu-separator" />
+                )}
+                {getMoveTargets(contextMenu.notebookId).map(nb => (
+                  <div
+                    key={nb.id}
+                    className="context-menu-item"
+                    onClick={() => handleMoveNotebook(nb.id)}
+                  >
+                    {nb.name}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
           <div className="context-menu-separator" />
           <div className="context-menu-item" onClick={handleDeleteNotebook}>
