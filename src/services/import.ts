@@ -309,6 +309,13 @@ export async function importQuiverLibrary(
     });
   }
 
+  // Post-import: rewrite quiver-note-url:// links to notch://note/ links
+  try {
+    await db.rewriteQuiverNoteLinks();
+  } catch {
+    // Non-fatal: links will still work via runtime lookup
+  }
+
   return result;
 }
 

@@ -852,6 +852,50 @@ export async function searchNotes(query: string): Promise<Note[]> {
   return notes;
 }
 
+// ==================== LINK REWRITING ====================
+
+/**
+ * Rewrite quiver-note-url:// links to notch://note/ links in all cell data.
+ * Builds a map from Quiver source UUIDs to Notch note IDs, then replaces
+ * all matching URLs in cell data.
+ */
+export async function rewriteQuiverNoteLinks(): Promise<number> {
+  // Build UUID → note ID map from all notes with a source_uuid
+  const noteRows = await getDb().select<{ id: string; source_uuid: string }[]>(
+    'SELECT id, source_uuid FROM notes WHERE source_uuid IS NOT NULL'
+  );
+  const uuidToNoteId = new Map<string, string>();
+  for (const row of noteRows) {
+    uuidToNoteId.set(row.source_uuid, row.id);
+  }
+  if (uuidToNoteId.size === 0) return 0;
+
+  // Find all cells that contain quiver-note-url links
+  const cellRows = await getDb().select<{ id: string; note_id: string; data: string }[]>(
+    "SELECT id, note_id, data FROM cells WHERE data LIKE '%quiver-note-url%'"
+  );
+
+  let rewritten = 0;
+  for (const cell of cellRows) {
+    const updated = cell.data.replace(
+      /quiver-note-url:\/?\/?([0-9A-Fa-f-]+)/g,
+      (match, quiverUuid) => {
+        const noteId = uuidToNoteId.get(quiverUuid);
+        if (noteId) {
+          rewritten++;
+          return `notch://note/${noteId}`;
+        }
+        return match; // leave unresolved links unchanged
+      }
+    );
+    if (updated !== cell.data) {
+      await getDb().execute('UPDATE cells SET data = ? WHERE id = ?', [updated, cell.id]);
+    }
+  }
+
+  return rewritten;
+}
+
 // ==================== INITIALIZATION ====================
 
 export async function ensureInboxNotebook(): Promise<Notebook> {
