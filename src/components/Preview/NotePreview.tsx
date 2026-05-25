@@ -4,10 +4,11 @@ import hljs from 'highlight.js';
 import katex from 'katex';
 import mermaid from 'mermaid';
 import DOMPurify from 'dompurify';
+import type { Config } from 'dompurify';
 import type { Note } from '../../types';
 
 // Configure DOMPurify for text cells
-const sanitizeConfig: DOMPurify.Config = {
+const sanitizeConfig: Config = {
   ALLOWED_TAGS: [
     'p', 'br', 'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'del',
     'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
@@ -19,6 +20,7 @@ const sanitizeConfig: DOMPurify.Config = {
   ],
   ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'style'],
   ALLOW_DATA_ATTR: false,
+  RETURN_TRUSTED_TYPE: false,
   // Allow custom protocols for internal links
   ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|notch|quiver-note-url):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
 };
@@ -29,7 +31,7 @@ interface NotePreviewProps {
 
 // Add line numbers to code
 function addLineNumbers(code: string, highlighted: string): string {
-  const lines = highlighted.split('\n');
+  const lines = code.split('\n');
   const lineCount = lines.length;
   const lineNumbers = Array.from({ length: lineCount }, (_, i) => i + 1).join('\n');
   return `<div class="code-with-lines"><div class="line-numbers">${lineNumbers}</div><code>${highlighted}</code></div>`;
@@ -45,7 +47,7 @@ marked.use({
   },
   renderer: {
     // Custom link renderer to preserve notch:// and quiver-note-url:// protocols
-    link(href: string, title: string | null, text: string) {
+    link(href: string, title: string | null | undefined, text: string) {
       const titleAttr = title ? ` title="${title}"` : '';
       return `<a href="${href}"${titleAttr}>${text}</a>`;
     },

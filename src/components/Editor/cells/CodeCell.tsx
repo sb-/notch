@@ -129,7 +129,7 @@ export default function CodeCell({
             verticalScrollbarSize: 8,
             horizontalScrollbarSize: 8,
           },
-          padding: { top: 12, bottom: 12, left: 8 },
+          padding: { top: 12, bottom: 12 },
           overviewRulerBorder: false,
           overviewRulerLanes: 0,
           hideCursorInOverviewRuler: true,

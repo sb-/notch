@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { useStore, useSelectedNote, useEditorViewMode, useNotebooks } from '../../store';
 import CellContainer from './CellContainer';
 import NotePreview from '../Preview/NotePreview';
+import FindBar from '../Search/FindBar';
 import { copyNoteLink } from '../NoteList/NoteListItem';
 import type { CellType, EditorViewMode } from '../../types';
 
@@ -13,7 +14,12 @@ const cellTypes: { type: CellType; label: string }[] = [
   { type: 'diagram', label: 'Diagram Cell' },
 ];
 
-export default function NoteEditor() {
+interface NoteEditorProps {
+  showFindBar?: boolean;
+  onCloseFindBar?: () => void;
+}
+
+export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorProps = {}) {
   const note = useSelectedNote();
   const notebooks = useNotebooks();
   const editorViewMode = useEditorViewMode();
@@ -349,6 +355,11 @@ export default function NoteEditor() {
           </div>
         </div>
       </div>
+
+      {/* Find Bar */}
+      {showFindBar && note && onCloseFindBar && (
+        <FindBar note={note} onClose={onCloseFindBar} />
+      )}
 
       {/* Title */}
       <div className="editor-title" onClick={closeAllMenus}>

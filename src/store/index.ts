@@ -229,7 +229,7 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   updateCell: async (noteId: string, cellId: string, updates: Partial<Cell>) => {
-    await db.updateCell(noteId, cellId, updates);
+    // Update store first so the UI reflects changes immediately (preserves cursor position)
     set(state => ({
       notes: state.notes.map(n => {
         if (n.id !== noteId) return n;
@@ -242,6 +242,7 @@ export const useStore = create<Store>((set, get) => ({
         };
       }),
     }));
+    await db.updateCell(noteId, cellId, updates);
   },
 
   deleteCell: async (noteId: string, cellId: string) => {

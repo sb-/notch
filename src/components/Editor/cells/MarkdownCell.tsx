@@ -22,7 +22,7 @@ marked.use({
   },
   renderer: {
     // Custom link renderer to preserve notch:// and quiver-note-url:// protocols
-    link(href: string, title: string | null, text: string) {
+    link(href: string, title: string | null | undefined, text: string) {
       const titleAttr = title ? ` title="${title}"` : '';
       return `<a href="${href}"${titleAttr}>${text}</a>`;
     },
@@ -44,7 +44,7 @@ marked.use({
 export default function MarkdownCell({ data, onChange, onFocus, isFocused, onBackspaceEmpty, onNavigatePrev, onNavigateNext }: MarkdownCellProps) {
   const [isEditing, setIsEditing] = useState(!data);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const wasEditing = useRef(isEditing);
+  const wasFocused = useRef(isFocused);
 
   const html = useMemo(() => {
     if (!data) return '';
@@ -58,35 +58,27 @@ export default function MarkdownCell({ data, onChange, onFocus, isFocused, onBac
   useEffect(() => {
     if (isEditing && textareaRef.current) {
       textareaRef.current.focus();
-      // Move cursor to end
       textareaRef.current.selectionStart = textareaRef.current.value.length;
     }
   }, [isEditing]);
 
-  // Auto-enter editing mode when cell becomes focused (for new cells)
+  // Enter edit mode when this cell becomes the focused cell (matches
+  // text/code cell behavior — focus puts the cursor in the editable surface).
   useEffect(() => {
-    if (isFocused && !wasEditing.current && !isEditing) {
+    if (isFocused && !wasFocused.current && !isEditing) {
       setIsEditing(true);
     }
-    wasEditing.current = isEditing;
+    wasFocused.current = isFocused;
   }, [isFocused, isEditing]);
 
   const handleClick = (e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
-    const anchor = target.closest('a');
-
-    // If clicked on a link, don't enter edit mode - let App.tsx handle navigation
-    if (anchor) {
-      return;
-    }
-
-    // Not a link click, enter edit mode
+    if (target.closest('a')) return;
     setIsEditing(true);
     onFocus();
   };
 
   const handleBlur = (e: React.FocusEvent) => {
-    // Don't exit editing if clicking within the same cell
     const relatedTarget = e.relatedTarget as HTMLElement;
     if (relatedTarget && e.currentTarget.contains(relatedTarget)) {
       return;
@@ -102,21 +94,17 @@ export default function MarkdownCell({ data, onChange, onFocus, isFocused, onBac
     const textarea = textareaRef.current;
     if (!textarea) return;
 
-    // Delete cell on backspace when empty
     if (e.key === 'Backspace' && !data.trim() && onBackspaceEmpty) {
       e.preventDefault();
       onBackspaceEmpty();
       return;
     }
-    // Exit editing mode on Escape
     if (e.key === 'Escape') {
       setIsEditing(false);
     }
-    // Arrow key navigation between cells
     if (e.key === 'ArrowUp' && onNavigatePrev) {
       const { selectionStart } = textarea;
       const textBeforeCursor = data.substring(0, selectionStart);
-      // Only navigate if we're on the first line (no newline before cursor)
       if (!textBeforeCursor.includes('\n')) {
         e.preventDefault();
         onNavigatePrev();
@@ -124,20 +112,17 @@ export default function MarkdownCell({ data, onChange, onFocus, isFocused, onBac
     } else if (e.key === 'ArrowDown' && onNavigateNext) {
       const { selectionStart } = textarea;
       const textAfterCursor = data.substring(selectionStart);
-      // Only navigate if we're on the last line (no newline after cursor)
       if (!textAfterCursor.includes('\n')) {
         e.preventDefault();
         onNavigateNext();
       }
     }
-    // Allow Tab for indentation
     if (e.key === 'Tab') {
       e.preventDefault();
       const start = textarea.selectionStart;
       const end = textarea.selectionEnd;
       const newValue = data.substring(0, start) + '  ' + data.substring(end);
       onChange(newValue);
-      // Move cursor after the inserted spaces
       setTimeout(() => {
         textarea.selectionStart = textarea.selectionEnd = start + 2;
       }, 0);

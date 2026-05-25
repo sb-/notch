@@ -144,6 +144,16 @@ export interface ImportOptions {
   onProgress?: ProgressCallback;
 }
 
+// Quiver library meta.json structure (root-level hierarchy)
+interface QuiverLibraryMeta {
+  children: QuiverLibraryMetaEntry[];
+}
+
+interface QuiverLibraryMetaEntry {
+  uuid: string;
+  children?: QuiverLibraryMetaEntry[];
+}
+
 // Info collected during notebook scanning phase
 interface NotebookScanInfo {
   path: string;
@@ -203,7 +213,7 @@ export async function importQuiverLibrary(
         const meta: QuiverNotebookMeta = JSON.parse(metaContent);
         notebooksByUuid.set(meta.uuid, { path: notebookPath, meta, parentUuid: null });
 
-        // Track children references
+        // Track children references from individual notebook meta
         if (meta.children && meta.children.length > 0) {
           for (const childUuid of meta.children) {
             childToParent.set(childUuid, meta.uuid);
@@ -211,6 +221,44 @@ export async function importQuiverLibrary(
         }
       } catch {
         // Skip notebooks we can't read metadata for
+      }
+    }
+
+    // Also read the library-level Meta.json for hierarchy info
+    // Quiver stores the notebook tree structure in the library's root Meta.json
+    // (capital "M") -- per-notebook files use lowercase meta.json. Try both for
+    // robustness across Quiver versions and case-sensitive filesystems (Linux).
+    const tryLibraryMetaPaths = [
+      `${libraryPath}/Meta.json`,
+      `${libraryPath}/meta.json`,
+    ];
+    let libraryMetaContent: string | null = null;
+    for (const path of tryLibraryMetaPaths) {
+      try {
+        libraryMetaContent = await readTextFile(path);
+        break;
+      } catch {
+        // Try next path
+      }
+    }
+    if (libraryMetaContent) {
+      try {
+        const libraryMeta: QuiverLibraryMeta = JSON.parse(libraryMetaContent);
+        if (libraryMeta.children) {
+          const extractHierarchy = (entries: QuiverLibraryMetaEntry[], parentUuid: string | null) => {
+            for (const entry of entries) {
+              if (parentUuid) {
+                childToParent.set(entry.uuid, parentUuid);
+              }
+              if (entry.children && entry.children.length > 0) {
+                extractHierarchy(entry.children, entry.uuid);
+              }
+            }
+          };
+          extractHierarchy(libraryMeta.children, null);
+        }
+      } catch {
+        // Library Meta.json may not have hierarchy info or may be malformed
       }
     }
 

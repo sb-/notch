@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useCallback } from 'react';
 import DOMPurify from 'dompurify';
+import type { Config } from 'dompurify';
 
 interface TextCellProps {
   data: string;
@@ -12,7 +13,7 @@ interface TextCellProps {
 }
 
 // Configure DOMPurify to allow safe HTML elements and attributes
-const sanitizeConfig: DOMPurify.Config = {
+const sanitizeConfig: Config = {
   ALLOWED_TAGS: [
     'p', 'br', 'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'del',
     'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
@@ -24,6 +25,7 @@ const sanitizeConfig: DOMPurify.Config = {
   ],
   ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'style'],
   ALLOW_DATA_ATTR: false,
+  RETURN_TRUSTED_TYPE: false,
   // Allow custom protocols for internal links
   ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|notch|quiver-note-url):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
 };

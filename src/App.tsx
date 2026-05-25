@@ -7,6 +7,7 @@ import { getNoteBySourceUuid, getNote } from './services/database';
 import Sidebar from './components/Sidebar/Sidebar';
 import NoteList from './components/NoteList/NoteList';
 import NoteEditor from './components/Editor/NoteEditor';
+import SearchOverlay from './components/Search/SearchOverlay';
 import type { EditorViewMode, LayoutMode } from './types';
 
 // Expose functions to Tauri for menu events
@@ -29,6 +30,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
+  const [showSearch, setShowSearch] = useState(false);
+  const [showFindBar, setShowFindBar] = useState(false);
   const loadData = useStore(state => state.loadData);
   const layoutMode = useLayoutMode();
   const sidebarVisible = useSidebarVisible();
@@ -237,18 +240,26 @@ export default function App() {
 
       console.log('Link clicked:', href, 'target:', target.tagName, 'anchor:', anchor);
 
-      // Check for Quiver note links
-      if (href.startsWith('quiver-note-url://') || href.startsWith('quiver-note-url:')) {
+      // Check for Quiver note links (various formats: quiver-note-url://UUID, quiver-note-url:UUID, quiver-note-url/UUID)
+      if (href.match(/^quiver-note-url[:/]/i)) {
         e.preventDefault();
         e.stopPropagation();
-        const uuid = href.replace(/^quiver-note-url:\/?\/?/, '');
+        const uuid = href.replace(/^quiver-note-url:?\/?\/?\/?/i, '');
         console.log('Quiver link, UUID:', uuid);
-        const note = await getNoteBySourceUuid(uuid);
-        console.log('Found note:', note?.id, note?.title);
-        if (note) {
-          const state = useStore.getState();
-          state.selectNotebook(note.notebookId);
-          state.selectNote(note.id);
+        try {
+          const note = await getNoteBySourceUuid(uuid);
+          console.log('Found note:', note?.id, note?.title);
+          if (note) {
+            const state = useStore.getState();
+            await state.selectNotebook(note.notebookId);
+            state.selectNote(note.id);
+          } else {
+            console.warn('Quiver note not found for UUID:', uuid);
+            await message('Linked note not found. It may not have been part of the imported library.', { title: 'Linked note', kind: 'warning' });
+          }
+        } catch (err) {
+          console.error('Error resolving Quiver link:', err);
+          await message(`Could not open linked note: ${err}`, { title: 'Linked note', kind: 'warning' });
         }
         return;
       }
@@ -280,13 +291,21 @@ export default function App() {
       const { href } = (e as CustomEvent).detail;
       console.log('Custom navigate event:', href);
 
-      if (href.startsWith('quiver-note-url://') || href.startsWith('quiver-note-url:')) {
-        const uuid = href.replace(/^quiver-note-url:\/?\/?/, '');
-        const note = await getNoteBySourceUuid(uuid);
-        if (note) {
-          const state = useStore.getState();
-          await state.selectNotebook(note.notebookId);
-          state.selectNote(note.id);
+      if (href.match(/^quiver-note-url[:/]/i)) {
+        const uuid = href.replace(/^quiver-note-url:?\/?\/?\/?/i, '');
+        try {
+          const note = await getNoteBySourceUuid(uuid);
+          if (note) {
+            const state = useStore.getState();
+            await state.selectNotebook(note.notebookId);
+            state.selectNote(note.id);
+          } else {
+            console.warn('Quiver note not found for UUID:', uuid);
+            await message('Linked note not found. It may not have been part of the imported library.', { title: 'Linked note', kind: 'warning' });
+          }
+        } catch (err) {
+          console.error('Error resolving Quiver link:', err);
+          await message(`Could not open linked note: ${err}`, { title: 'Linked note', kind: 'warning' });
         }
       } else if (href.startsWith('notch://note/')) {
         const noteId = href.replace('notch://note/', '');
@@ -356,6 +375,18 @@ export default function App() {
         e.preventDefault();
         useStore.getState().setEditorViewMode('split');
       }
+      // Cmd+Shift+F: Full text search
+      if (e.metaKey && e.key === 'f' && e.shiftKey) {
+        e.preventDefault();
+        setShowSearch(true);
+        setShowFindBar(false);
+      }
+      // Cmd+F: Find in note
+      if (e.metaKey && e.key === 'f' && !e.shiftKey) {
+        e.preventDefault();
+        setShowFindBar(prev => !prev);
+        setShowSearch(false);
+      }
       // Cmd+N: New note
       if (e.metaKey && e.key === 'n' && !e.shiftKey) {
         e.preventDefault();
@@ -396,7 +427,8 @@ export default function App() {
     <div className="app">
       {sidebarVisible && layoutMode === 'triple' && <Sidebar />}
       {(layoutMode === 'triple' || layoutMode === 'double') && <NoteList />}
-      <NoteEditor />
+      <NoteEditor showFindBar={showFindBar} onCloseFindBar={() => setShowFindBar(false)} />
+      {showSearch && <SearchOverlay onClose={() => setShowSearch(false)} />}
       {importProgress && (
         <div className="import-overlay">
           <div className="import-modal">

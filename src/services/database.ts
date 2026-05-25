@@ -111,6 +111,55 @@ export async function initDatabase(): Promise<void> {
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_cells_note ON cells(note_id)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_note_tags_note ON note_tags(note_id)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id)`);
+
+  // Backfill FTS index for notes created before notes_fts existed (or that
+  // were inserted via paths that bypassed updateNoteFTS). Only runs when the
+  // FTS table is empty but notes already exist.
+  await backfillFTSIfNeeded();
+}
+
+// One-time backfill: populate notes_fts from all existing notes/cells when
+// the FTS index is empty but notes exist (e.g., user imported a library or
+// upgraded from a version without FTS).
+async function backfillFTSIfNeeded(): Promise<void> {
+  if (!db) return;
+  try {
+    const noteCount = await db.select<{ c: number }[]>(
+      'SELECT COUNT(*) as c FROM notes'
+    );
+    const ftsCount = await db.select<{ c: number }[]>(
+      'SELECT COUNT(*) as c FROM notes_fts'
+    );
+    const notes = noteCount[0]?.c ?? 0;
+    const ftsRows = ftsCount[0]?.c ?? 0;
+    if (notes === 0 || ftsRows >= notes) return;
+
+    // Build FTS rows from notes + cells in a single pass
+    const noteRows = await db.select<{ id: string; title: string }[]>(
+      'SELECT id, title FROM notes'
+    );
+    const cellRows = await db.select<{ note_id: string; data: string }[]>(
+      'SELECT note_id, data FROM cells ORDER BY note_id, sort_order'
+    );
+    const contentByNote = new Map<string, string[]>();
+    for (const c of cellRows) {
+      const arr = contentByNote.get(c.note_id) ?? [];
+      arr.push(c.data);
+      contentByNote.set(c.note_id, arr);
+    }
+
+    // Clear any partial rows then repopulate
+    await db.execute('DELETE FROM notes_fts');
+    for (const n of noteRows) {
+      const content = (contentByNote.get(n.id) ?? []).join('\n');
+      await db.execute(
+        'INSERT INTO notes_fts (note_id, title, content) VALUES (?, ?, ?)',
+        [n.id, n.title, content]
+      );
+    }
+  } catch (err) {
+    console.warn('FTS backfill failed:', err);
+  }
 }
 
 // Helper to get the database instance
@@ -339,7 +388,7 @@ export async function getNote(id: string): Promise<Note | null> {
 
 export async function getNoteBySourceUuid(sourceUuid: string): Promise<Note | null> {
   const rows = await getDb().select<NoteRow[]>(
-    'SELECT * FROM notes WHERE source_uuid = ?',
+    'SELECT * FROM notes WHERE LOWER(source_uuid) = LOWER(?)',
     [sourceUuid]
   );
 
@@ -831,16 +880,32 @@ async function updateNoteFTS(noteId: string): Promise<void> {
 export async function searchNotes(query: string): Promise<Note[]> {
   if (!query.trim()) return [];
 
-  // Prepare FTS5 query
-  const ftsQuery = query
+  // Prepare FTS5 query: sanitize each term to avoid FTS5 syntax errors.
+  // FTS5 treats double quotes, asterisks, parentheses, colons, and other
+  // characters as operators. We strip them from each token and wrap the
+  // result in double quotes (a "phrase") so the user's literal text is
+  // matched verbatim. Empty tokens (after sanitization) are dropped.
+  const terms = query
     .split(/\s+/)
-    .map(term => `"${term}"*`)
-    .join(' OR ');
+    .map(term => term.replace(/["*():^+\-]/g, '').trim())
+    .filter(term => term.length > 0);
 
-  const rows = await getDb().select<{ note_id: string }[]>(
-    `SELECT note_id FROM notes_fts WHERE notes_fts MATCH ? ORDER BY rank`,
-    [ftsQuery]
-  );
+  if (terms.length === 0) return [];
+
+  const ftsQuery = terms.map(term => `"${term}"*`).join(' OR ');
+
+  let rows: { note_id: string }[];
+  try {
+    rows = await getDb().select<{ note_id: string }[]>(
+      `SELECT note_id FROM notes_fts WHERE notes_fts MATCH ? ORDER BY rank`,
+      [ftsQuery]
+    );
+  } catch (err) {
+    // FTS5 parser threw (e.g., malformed query) — return no results
+    // instead of bubbling an exception up to the UI.
+    console.warn('FTS5 query failed:', err);
+    return [];
+  }
 
   const notes: Note[] = [];
   for (const row of rows) {
@@ -861,12 +926,13 @@ export async function searchNotes(query: string): Promise<Note[]> {
  */
 export async function rewriteQuiverNoteLinks(): Promise<number> {
   // Build UUID → note ID map from all notes with a source_uuid
+  // Use lowercase keys for case-insensitive matching
   const noteRows = await getDb().select<{ id: string; source_uuid: string }[]>(
     'SELECT id, source_uuid FROM notes WHERE source_uuid IS NOT NULL'
   );
   const uuidToNoteId = new Map<string, string>();
   for (const row of noteRows) {
-    uuidToNoteId.set(row.source_uuid, row.id);
+    uuidToNoteId.set(row.source_uuid.toLowerCase(), row.id);
   }
   if (uuidToNoteId.size === 0) return 0;
 
@@ -878,9 +944,9 @@ export async function rewriteQuiverNoteLinks(): Promise<number> {
   let rewritten = 0;
   for (const cell of cellRows) {
     const updated = cell.data.replace(
-      /quiver-note-url:\/?\/?([0-9A-Fa-f-]+)/g,
+      /quiver-note-url:?\/?\/?\/?([0-9A-Fa-f-]+)/gi,
       (match, quiverUuid) => {
-        const noteId = uuidToNoteId.get(quiverUuid);
+        const noteId = uuidToNoteId.get(quiverUuid.toLowerCase());
         if (noteId) {
           rewritten++;
           return `notch://note/${noteId}`;
