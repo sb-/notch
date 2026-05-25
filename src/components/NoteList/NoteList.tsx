@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { useStore, useNotes, useNotebooks } from '../../store';
 import NoteListItem from './NoteListItem';
 import type { SortBy } from '../../types';
+import { getNotebookSubtreeIds } from '../../utils/notebooks';
 
 function getTitle(
   collection: string | null,
@@ -59,7 +60,8 @@ export default function NoteList() {
 
     // Filter based on current selection
     if (selectedNotebookId) {
-      filtered = notes.filter(n => n.notebookId === selectedNotebookId && !n.isTrashed);
+      const notebookIds = getNotebookSubtreeIds(notebooks, selectedNotebookId);
+      filtered = notes.filter(n => notebookIds.has(n.notebookId) && !n.isTrashed);
     } else if (selectedTagId) {
       const tag = tags.find(t => t.id === selectedTagId);
       if (tag) {

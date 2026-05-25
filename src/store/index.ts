@@ -13,6 +13,7 @@ import type {
   AppActions,
 } from '../types';
 import * as db from '../services/database';
+import { getNotebookSubtreeIds } from '../utils/notebooks';
 
 type Store = AppState & AppActions;
 
@@ -52,8 +53,11 @@ export const useStore = create<Store>((set, get) => ({
   // ==================== SELECTION ACTIONS ====================
 
   selectNotebook: async (id: string | null) => {
-    const allNotes = get().notes;
-    const notesInNotebook = id ? allNotes.filter(n => n.notebookId === id && !n.isTrashed) : [];
+    const state = get();
+    const notebookIds = id ? getNotebookSubtreeIds(state.notebooks, id) : new Set<string>();
+    const notesInNotebook = id
+      ? state.notes.filter(n => notebookIds.has(n.notebookId) && !n.isTrashed)
+      : [];
     set({
       selectedNotebookId: id,
       selectedCollection: null,

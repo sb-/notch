@@ -1,16 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useStore, useNotebooks, useTags } from '../../store';
 import type { Notebook, SpecialCollection } from '../../types';
-
-// Helper to check if a notebook is a descendant of another
-function isDescendantOf(notebooks: Notebook[], potentialDescendantId: string, ancestorId: string): boolean {
-  let current = notebooks.find(n => n.id === potentialDescendantId);
-  while (current?.parentId) {
-    if (current.parentId === ancestorId) return true;
-    current = notebooks.find(n => n.id === current!.parentId);
-  }
-  return false;
-}
+import { getNotebookSubtreeIds, isDescendantOf } from '../../utils/notebooks';
 
 interface NoteCounts {
   inbox: number;
@@ -272,7 +263,8 @@ export default function Sidebar() {
     trash: notes.filter(n => n.isTrashed).length,
     all: notes.filter(n => !n.isTrashed).length,
     notebooks: notebooks.reduce((acc, nb) => {
-      acc[nb.id] = notes.filter(n => n.notebookId === nb.id && !n.isTrashed).length;
+      const notebookIds = getNotebookSubtreeIds(notebooks, nb.id);
+      acc[nb.id] = notes.filter(n => notebookIds.has(n.notebookId) && !n.isTrashed).length;
       return acc;
     }, {} as Record<string, number>),
   };
