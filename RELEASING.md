@@ -22,18 +22,20 @@ updater plugin.
 
 ### Required — updater signing
 
-The signing keypair was generated locally at `~/.tauri/notch.key` (private) and
-`~/.tauri/notch.key.pub` (public, already committed in `tauri.conf.json`). Add
-the private key as a repo secret:
+The signing keypair lives locally at `~/.tauri/notch.key` (private) and
+`~/.tauri/notch.key.pub` (public, already committed in `tauri.conf.json`). Its
+password is stored at `~/.tauri/notch.pass`. Both repo secrets are already set;
+to (re)create them:
 
 ```sh
 gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/notch.key
-gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body ""
+gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD < ~/.tauri/notch.pass
 ```
 
-> ⚠️ **Back up `~/.tauri/notch.key`.** If you lose it you can no longer sign
-> updates that existing installs will accept — you'd have to ship a new public
-> key, which breaks the update chain for everyone already on an old version.
+> ⚠️ **Back up `~/.tauri/notch.key` and `~/.tauri/notch.pass`** (e.g. to a
+> password manager). If you lose either you can no longer sign updates that
+> existing installs will accept — you'd have to ship a new public key, which
+> breaks the update chain for everyone already on an old version.
 
 ### Optional — Apple Developer ID signing & notarization
 
