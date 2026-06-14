@@ -1,14 +1,38 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { open, save, message, ask } from '@tauri-apps/plugin-dialog';
 import { useStore, useLayoutMode, useSidebarVisible } from './store';
 import { importQuiverLibrary, scanForDuplicates, type ImportProgress } from './services/import';
 import { exportNoteToMarkdown, exportNoteToHTML, exportNoteToJSON, exportLibraryToJSON, saveToFile } from './services/export';
 import { getNoteBySourceUuid, getNote } from './services/database';
+import { loadResourcesForNote } from './services/resources';
+import {
+  createLibrary,
+  getActiveLibraryId,
+  getLibraries,
+  setActiveLibraryId,
+  type LibraryInfo,
+} from './services/libraries';
 import Sidebar from './components/Sidebar/Sidebar';
 import NoteList from './components/NoteList/NoteList';
 import NoteEditor from './components/Editor/NoteEditor';
 import SearchOverlay from './components/Search/SearchOverlay';
 import type { EditorViewMode, LayoutMode } from './types';
+
+const SIDEBAR_WIDTH_KEY = 'notch.sidebarWidth';
+const NOTELIST_WIDTH_KEY = 'notch.noteListWidth';
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+function getStoredWidth(key: string, fallback: number, min: number, max: number): number {
+  try {
+    const stored = window.localStorage.getItem(key);
+    const parsed = stored ? Number(stored) : fallback;
+    return Number.isFinite(parsed) ? clamp(parsed, min, max) : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 // Expose functions to Tauri for menu events
 declare global {
@@ -16,9 +40,12 @@ declare global {
     __NOTCH__: {
       newNote: () => void;
       newNotebook: () => void;
+      newLibrary: () => void;
       importLibrary: () => void;
       exportNote: () => void;
       exportLibrary: () => void;
+      searchAllNotes: () => void;
+      findInNote: () => void;
       toggleSidebar: () => void;
       setLayoutMode: (mode: LayoutMode) => void;
       setEditorViewMode: (mode: EditorViewMode) => void;
@@ -32,12 +59,74 @@ export default function App() {
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
   const [showSearch, setShowSearch] = useState(false);
   const [showFindBar, setShowFindBar] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() => getStoredWidth(SIDEBAR_WIDTH_KEY, 180, 140, 360));
+  const [noteListWidth, setNoteListWidth] = useState(() => getStoredWidth(NOTELIST_WIDTH_KEY, 240, 180, 520));
+  const [libraries, setLibraries] = useState<LibraryInfo[]>(() => getLibraries());
+  const [activeLibraryId, setActiveLibrary] = useState(() => getActiveLibraryId());
+  const [isCreateLibraryOpen, setIsCreateLibraryOpen] = useState(false);
+  const [newLibraryName, setNewLibraryName] = useState('');
+  const newLibraryInputRef = useRef<HTMLInputElement>(null);
   const loadData = useStore(state => state.loadData);
   const layoutMode = useLayoutMode();
   const sidebarVisible = useSidebarVisible();
+  const activeLibrary = libraries.find(library => library.id === activeLibraryId) ?? libraries[0];
+
+  const handleCreateLibrary = useCallback(() => {
+    setNewLibraryName('');
+    setIsCreateLibraryOpen(true);
+  }, []);
 
   useEffect(() => {
-    loadData()
+    if (!isCreateLibraryOpen) return;
+
+    requestAnimationFrame(() => {
+      newLibraryInputRef.current?.focus();
+    });
+  }, [isCreateLibraryOpen]);
+
+  const startColumnResize = (
+    column: 'sidebar' | 'noteList',
+    e: ReactPointerEvent<HTMLDivElement>
+  ) => {
+    e.preventDefault();
+
+    const isSidebar = column === 'sidebar';
+    const startX = e.clientX;
+    const startWidth = isSidebar ? sidebarWidth : noteListWidth;
+    const min = isSidebar ? 140 : 180;
+    const max = isSidebar ? 360 : 520;
+    const storageKey = isSidebar ? SIDEBAR_WIDTH_KEY : NOTELIST_WIDTH_KEY;
+    const setWidth = isSidebar ? setSidebarWidth : setNoteListWidth;
+    let latestWidth = startWidth;
+
+    document.body.classList.add('resizing-column');
+
+    const handlePointerMove = (event: PointerEvent) => {
+      latestWidth = clamp(startWidth + event.clientX - startX, min, max);
+      setWidth(latestWidth);
+    };
+
+    const stopResize = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResize);
+      window.removeEventListener('pointercancel', stopResize);
+      document.body.classList.remove('resizing-column');
+      try {
+        window.localStorage.setItem(storageKey, String(latestWidth));
+      } catch {
+        // Ignore storage failures; resizing still works for the current session.
+      }
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResize);
+    window.addEventListener('pointercancel', stopResize);
+  };
+
+  useEffect(() => {
+    if (!activeLibrary) return;
+
+    loadData(activeLibrary.dbPath)
       .then(() => setLoading(false))
       .catch(err => {
         console.error('Failed to initialize database:', err);
@@ -59,6 +148,9 @@ export default function App() {
         if (name) {
           useStore.getState().createNotebook(name);
         }
+      },
+      newLibrary: () => {
+        handleCreateLibrary();
       },
       importLibrary: async () => {
         const selected = await open({
@@ -126,7 +218,7 @@ export default function App() {
           });
 
           setImportProgress(null);
-          await useStore.getState().loadData();
+          await useStore.getState().loadData(activeLibrary.dbPath);
 
           // Format result message
           let msg = `Successfully imported ${result.notesImported} notes from ${result.notebooks} notebooks.`;
@@ -154,11 +246,21 @@ export default function App() {
       },
       exportNote: async () => {
         const state = useStore.getState();
-        const note = state.notes.find(n => n.id === state.selectedNoteId);
+        const selectedNoteId = state.selectedNoteId;
+        if (!selectedNoteId) {
+          await message('No note selected', { title: 'Export Note', kind: 'error' });
+          return;
+        }
+        await state.loadNoteBody(selectedNoteId);
+
+        const note = useStore.getState().notes.find(n => n.id === selectedNoteId);
         if (!note) {
           await message('No note selected', { title: 'Export Note', kind: 'error' });
           return;
         }
+
+        // Ensure embedded images are cached so exports can inline them.
+        await loadResourcesForNote(note.id);
 
         const sanitizedTitle = note.title.replace(/[^a-zA-Z0-9\s-]/g, '_').trim() || 'untitled';
         const savePath = await save({
@@ -207,6 +309,14 @@ export default function App() {
           }
         }
       },
+      searchAllNotes: () => {
+        setShowSearch(true);
+        setShowFindBar(false);
+      },
+      findInNote: () => {
+        setShowFindBar(true);
+        setShowSearch(false);
+      },
       toggleSidebar: () => {
         useStore.getState().toggleSidebar();
       },
@@ -217,7 +327,47 @@ export default function App() {
         useStore.getState().setEditorViewMode(mode);
       },
     };
-  }, [loadData]);
+  }, [activeLibrary, loadData]);
+
+  const handleSelectLibrary = async (libraryId: string) => {
+    const library = libraries.find(item => item.id === libraryId);
+    if (!library || library.id === activeLibraryId) return;
+    setLoading(true);
+    setError(null);
+    setActiveLibraryId(library.id);
+    setActiveLibrary(library.id);
+  };
+
+  const closeCreateLibraryDialog = () => {
+    setIsCreateLibraryOpen(false);
+    setNewLibraryName('');
+  };
+
+  const handleCreateLibrarySubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const name = newLibraryName.trim();
+    if (!name) {
+      newLibraryInputRef.current?.focus();
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setIsCreateLibraryOpen(false);
+
+    try {
+      const library = createLibrary(name);
+      const nextLibraries = getLibraries();
+      setLibraries(nextLibraries);
+      setActiveLibraryId(library.id);
+      setActiveLibrary(library.id);
+      setNewLibraryName('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     // Intercept all clicks on note links at document level with capture
@@ -331,8 +481,16 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Cmd+Z: Undo (let browser handle it for contentEditable)
       if (e.metaKey && e.key === 'z' && !e.shiftKey) {
-        // Don't prevent default - let browser handle undo
-        document.execCommand('undo');
+        const target = e.target as HTMLElement | null;
+        const isEditable = target?.closest('input, textarea, [contenteditable="true"]');
+        if (isEditable) return;
+
+        e.preventDefault();
+        useStore.getState().undoLastCellConversion().then(undidConversion => {
+          if (!undidConversion) {
+            document.execCommand('undo');
+          }
+        });
         return;
       }
       // Cmd+Shift+Z: Redo
@@ -384,7 +542,7 @@ export default function App() {
       // Cmd+F: Find in note
       if (e.metaKey && e.key === 'f' && !e.shiftKey) {
         e.preventDefault();
-        setShowFindBar(prev => !prev);
+        setShowFindBar(true);
         setShowSearch(false);
       }
       // Cmd+N: New note
@@ -404,9 +562,11 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="app">
-        <div className="empty-state">
-          <div className="empty-state-title">Loading...</div>
+      <div className="app app-state">
+        <div className="loading-state" role="status" aria-live="polite">
+          <div className="loading-indicator" aria-hidden="true" />
+          <div className="loading-title">Notch</div>
+          <div className="loading-text">Opening library...</div>
         </div>
       </div>
     );
@@ -414,7 +574,7 @@ export default function App() {
 
   if (error) {
     return (
-      <div className="app">
+      <div className="app app-state">
         <div className="empty-state">
           <div className="empty-state-title">Error</div>
           <div className="empty-state-text">{error}</div>
@@ -423,12 +583,80 @@ export default function App() {
     );
   }
 
+  const appStyle = {
+    '--sidebar-width': `${sidebarWidth}px`,
+    '--notelist-width': `${noteListWidth}px`,
+  } as CSSProperties;
+
   return (
-    <div className="app">
-      {sidebarVisible && layoutMode === 'triple' && <Sidebar />}
-      {(layoutMode === 'triple' || layoutMode === 'double') && <NoteList />}
+    <div className="app" style={appStyle}>
+      {sidebarVisible && layoutMode === 'triple' && (
+        <>
+          <Sidebar
+            libraries={libraries}
+            activeLibraryId={activeLibraryId}
+            onSelectLibrary={handleSelectLibrary}
+            onCreateLibrary={handleCreateLibrary}
+          />
+          <div
+            className="column-resizer"
+            role="separator"
+            aria-label="Resize notebooks sidebar"
+            aria-orientation="vertical"
+            onPointerDown={e => startColumnResize('sidebar', e)}
+          />
+        </>
+      )}
+      {(layoutMode === 'triple' || layoutMode === 'double') && (
+        <>
+          <NoteList
+            onOpenSearch={() => {
+              setShowSearch(true);
+              setShowFindBar(false);
+            }}
+          />
+          <div
+            className="column-resizer"
+            role="separator"
+            aria-label="Resize note list"
+            aria-orientation="vertical"
+            onPointerDown={e => startColumnResize('noteList', e)}
+          />
+        </>
+      )}
       <NoteEditor showFindBar={showFindBar} onCloseFindBar={() => setShowFindBar(false)} />
       {showSearch && <SearchOverlay onClose={() => setShowSearch(false)} />}
+      {isCreateLibraryOpen && (
+        <div className="library-dialog-overlay" onClick={closeCreateLibraryDialog}>
+          <form className="library-dialog" onSubmit={handleCreateLibrarySubmit} onClick={e => e.stopPropagation()}>
+            <div className="library-dialog-title">New Library</div>
+            <label className="library-dialog-label" htmlFor="new-library-name">
+              Name
+            </label>
+            <input
+              ref={newLibraryInputRef}
+              id="new-library-name"
+              className="library-dialog-input"
+              type="text"
+              value={newLibraryName}
+              onChange={e => setNewLibraryName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Escape') {
+                  closeCreateLibraryDialog();
+                }
+              }}
+            />
+            <div className="library-dialog-actions">
+              <button type="button" className="library-dialog-button" onClick={closeCreateLibraryDialog}>
+                Cancel
+              </button>
+              <button type="submit" className="library-dialog-button primary" disabled={!newLibraryName.trim()}>
+                Create
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
       {importProgress && (
         <div className="import-overlay">
           <div className="import-modal">

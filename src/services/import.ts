@@ -1,6 +1,34 @@
-import { readDir, readTextFile } from '@tauri-apps/plugin-fs';
+import { readDir, readTextFile, readFile } from '@tauri-apps/plugin-fs';
 import type { CellType, DiagramType } from '../types';
 import * as db from './database';
+import { bytesToBase64, RESOURCE_PROTOCOL } from './resources';
+
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  bmp: 'image/bmp',
+  tiff: 'image/tiff',
+  pdf: 'application/pdf',
+};
+
+function mimeForFilename(name: string): string {
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  return IMAGE_MIME_BY_EXT[ext] || 'application/octet-stream';
+}
+
+/** Rewrite Quiver `quiver-image-url/<file>` refs to `notch-resource://<id>`. */
+function rewriteQuiverImageRefs(data: string, idByName: Map<string, string>): string {
+  if (idByName.size === 0) return data;
+  return data.replace(/quiver-image-url(?::\/\/|\/+)([^\s"')]+)/gi, (match, name: string) => {
+    const base = name.split('/').pop() || name;
+    const id = idByName.get(base) || idByName.get(name);
+    return id ? `${RESOURCE_PROTOCOL}${id}` : match;
+  });
+}
 
 // Quiver data format types
 interface QuiverNotebookMeta {
@@ -477,7 +505,30 @@ async function importQuiverNote(notePath: string, notebookId: string): Promise<v
     await db.deleteCell(note.id, cell.id);
   }
 
-  // Create cells from Quiver content
+  // Import binary resources (images, attachments) stored alongside the note.
+  const resourceIdByName = new Map<string, string>();
+  try {
+    const resourceEntries = await readDir(`${notePath}/resources`);
+    for (const entry of resourceEntries) {
+      if (!entry.isFile) continue;
+      try {
+        const bytes = await readFile(`${notePath}/resources/${entry.name}`);
+        const resource = await db.createResource(
+          note.id,
+          entry.name,
+          mimeForFilename(entry.name),
+          bytesToBase64(bytes)
+        );
+        resourceIdByName.set(entry.name, resource.id);
+      } catch {
+        // Skip resources we can't read
+      }
+    }
+  } catch {
+    // Resources directory may not exist
+  }
+
+  // Create cells from Quiver content, rewriting image refs to resource URLs.
   for (let i = 0; i < content.cells.length; i++) {
     const quiverCell = content.cells[i];
     const cellType = mapCellType(quiverCell.type);
@@ -486,7 +537,7 @@ async function importQuiverNote(notePath: string, notebookId: string): Promise<v
 
     // Update cell with data
     await db.updateCell(note.id, cell.id, {
-      data: quiverCell.data,
+      data: rewriteQuiverImageRefs(quiverCell.data, resourceIdByName),
       language: quiverCell.language,
       diagramType: mapDiagramType(quiverCell.diagramType),
     });
@@ -510,20 +561,6 @@ async function importQuiverNote(notePath: string, notebookId: string): Promise<v
     createdAt: meta.created_at * 1000, // Quiver uses seconds
     updatedAt: meta.updated_at * 1000,
   });
-
-  // Import resources if they exist
-  try {
-    const resourcesPath = `${notePath}/resources`;
-    const resources = await readDir(resourcesPath);
-    for (const resource of resources) {
-      if (resource.isFile) {
-        // Resource import would go here
-        // For now, we skip binary resources
-      }
-    }
-  } catch {
-    // Resources directory may not exist
-  }
 }
 
 /**

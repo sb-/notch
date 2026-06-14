@@ -1,8 +1,16 @@
 import React, { useRef, useEffect, useCallback } from 'react';
-import DOMPurify from 'dompurify';
-import type { Config } from 'dompurify';
+import { sanitizeRichText } from '../../../services/html';
+import {
+  createResourceFromFile,
+  resolveResourceHtml,
+  dehydrateResourceHtml,
+  getResourceDataUrl,
+  useResourceVersion,
+  RESOURCE_PROTOCOL,
+} from '../../../services/resources';
 
 interface TextCellProps {
+  noteId: string;
   data: string;
   onChange: (data: string) => void;
   onFocus: () => void;
@@ -12,29 +20,8 @@ interface TextCellProps {
   onNavigateNext?: () => void;
 }
 
-// Configure DOMPurify to allow safe HTML elements and attributes
-const sanitizeConfig: Config = {
-  ALLOWED_TAGS: [
-    'p', 'br', 'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'del',
-    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-    'ul', 'ol', 'li',
-    'blockquote', 'pre', 'code',
-    'a', 'span', 'div',
-    'table', 'thead', 'tbody', 'tr', 'th', 'td',
-    'hr', 'sub', 'sup',
-  ],
-  ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'style'],
-  ALLOW_DATA_ATTR: false,
-  RETURN_TRUSTED_TYPE: false,
-  // Allow custom protocols for internal links
-  ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|notch|quiver-note-url):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
-};
-
-function sanitizeHtml(html: string): string {
-  return DOMPurify.sanitize(html, sanitizeConfig);
-}
-
 export default function TextCell({
+  noteId,
   data,
   onChange,
   onFocus,
@@ -46,19 +33,37 @@ export default function TextCell({
   const editorRef = useRef<HTMLDivElement>(null);
   const isComposing = useRef(false);
   const initializedRef = useRef(false);
+  const resourceVersion = useResourceVersion();
 
-  // Set initial content only once on mount
+  // Set initial content only once on mount (with resource refs resolved to data URLs).
   useEffect(() => {
     if (editorRef.current && !initializedRef.current) {
-      editorRef.current.innerHTML = sanitizeHtml(data);
+      editorRef.current.innerHTML = sanitizeRichText(resolveResourceHtml(data));
       initializedRef.current = true;
     }
+    // Initialize once on mount; cells remount (keyed by id) when the note changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Handle input changes - just notify parent, don't touch DOM
+  // When resources finish loading (or change), point any unresolved <img> at the
+  // freshly-cached data URL without rewriting the whole editor (preserves cursor).
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.querySelectorAll('img[data-resource-id]').forEach(img => {
+      const id = img.getAttribute('data-resource-id');
+      const src = img.getAttribute('src') ?? '';
+      if (id && (src.startsWith(RESOURCE_PROTOCOL) || !src)) {
+        const url = getResourceDataUrl(id);
+        if (url) img.setAttribute('src', url);
+      }
+    });
+  }, [resourceVersion]);
+
+  // Handle input changes - store the dehydrated form (resource refs, not data URLs).
   const handleInput = useCallback(() => {
     if (editorRef.current && !isComposing.current) {
-      onChange(editorRef.current.innerHTML);
+      onChange(dehydrateResourceHtml(editorRef.current.innerHTML));
     }
   }, [onChange]);
 
@@ -71,11 +76,26 @@ export default function TextCell({
     handleInput();
   };
 
+  const insertImageFiles = useCallback(async (files: File[]) => {
+    const images = files.filter(file => file.type.startsWith('image/'));
+    if (images.length === 0) return;
+    for (const file of images) {
+      const id = await createResourceFromFile(noteId, file);
+      const url = getResourceDataUrl(id) ?? '';
+      document.execCommand(
+        'insertHTML',
+        false,
+        `<img src="${url}" data-resource-id="${id}" alt="${file.name.replace(/"/g, '')}" />`
+      );
+    }
+    handleInput();
+  }, [noteId, handleInput]);
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const editor = editorRef.current;
     if (!editor) return;
 
-    const isEmpty = !editor.textContent?.trim();
+    const isEmpty = !editor.textContent?.trim() && !editor.querySelector('img');
 
     if (e.key === 'Backspace' && isEmpty && onBackspaceEmpty) {
       e.preventDefault();
@@ -120,12 +140,26 @@ export default function TextCell({
   }, [isFocused]);
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const files = Array.from(e.clipboardData.files);
+    if (files.some(file => file.type.startsWith('image/'))) {
+      e.preventDefault();
+      void insertImageFiles(files);
+      return;
+    }
     e.preventDefault();
     const html = e.clipboardData.getData('text/html');
     const text = e.clipboardData.getData('text/plain');
-    const content = html ? sanitizeHtml(html) : text;
+    const content = html ? sanitizeRichText(html) : text;
     document.execCommand('insertHTML', false, content);
-  }, []);
+  }, [insertImageFiles]);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    const files = Array.from(e.dataTransfer.files);
+    if (files.some(file => file.type.startsWith('image/'))) {
+      e.preventDefault();
+      void insertImageFiles(files);
+    }
+  }, [insertImageFiles]);
 
   // Use native event listener for link clicks - React events don't work well with contentEditable
   useEffect(() => {
@@ -139,12 +173,10 @@ export default function TextCell({
       while (el && el !== editor) {
         if (el.tagName === 'A') {
           const href = el.getAttribute('href');
-          console.log('TextCell native click on link:', href);
           if (href && (href.startsWith('notch://') || href.startsWith('quiver-note-url'))) {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
-            console.log('TextCell: Dispatching navigate event for:', href);
             window.dispatchEvent(new CustomEvent('notch-navigate', { detail: { href } }));
           }
           return;
@@ -167,6 +199,7 @@ export default function TextCell({
       onFocus={onFocus}
       onKeyDown={handleKeyDown}
       onPaste={handlePaste}
+      onDrop={handleDrop}
       onCompositionStart={handleCompositionStart}
       onCompositionEnd={handleCompositionEnd}
       suppressContentEditableWarning

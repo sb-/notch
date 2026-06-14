@@ -4,19 +4,33 @@ import type {
   Note,
   Cell,
   Tag,
+  Resource,
   NotebookRow,
   NoteRow,
   CellRow,
   TagRow,
+  ResourceRow,
   CellType,
 } from '../types';
 import { v4 as uuid } from 'uuid';
 
 let db: Database | null = null;
+let currentDbPath: string | null = null;
 
 // Initialize the database connection and create tables
-export async function initDatabase(): Promise<void> {
-  db = await Database.load('sqlite:notch.db');
+export async function initDatabase(dbPath = 'sqlite:notch.db'): Promise<void> {
+  if (db && currentDbPath === dbPath) return;
+
+  if (db) {
+    try {
+      await db.close(currentDbPath ?? undefined);
+    } catch {
+      // Ignore close failures; loading the requested database below is authoritative.
+    }
+  }
+
+  db = await Database.load(dbPath);
+  currentDbPath = dbPath;
 
   // Create tables
   await db.execute(`
@@ -134,29 +148,22 @@ async function backfillFTSIfNeeded(): Promise<void> {
     const ftsRows = ftsCount[0]?.c ?? 0;
     if (notes === 0 || ftsRows >= notes) return;
 
-    // Build FTS rows from notes + cells in a single pass
-    const noteRows = await db.select<{ id: string; title: string }[]>(
-      'SELECT id, title FROM notes'
-    );
-    const cellRows = await db.select<{ note_id: string; data: string }[]>(
-      'SELECT note_id, data FROM cells ORDER BY note_id, sort_order'
-    );
-    const contentByNote = new Map<string, string[]>();
-    for (const c of cellRows) {
-      const arr = contentByNote.get(c.note_id) ?? [];
-      arr.push(c.data);
-      contentByNote.set(c.note_id, arr);
-    }
-
-    // Clear any partial rows then repopulate
+    // Clear any partial rows then repopulate in SQLite. Doing this note-by-note
+    // from JS makes large imported libraries noticeably slower to open.
     await db.execute('DELETE FROM notes_fts');
-    for (const n of noteRows) {
-      const content = (contentByNote.get(n.id) ?? []).join('\n');
-      await db.execute(
-        'INSERT INTO notes_fts (note_id, title, content) VALUES (?, ?, ?)',
-        [n.id, n.title, content]
-      );
-    }
+    await db.execute(`
+      INSERT INTO notes_fts (note_id, title, content)
+      SELECT
+        n.id,
+        n.title,
+        COALESCE((
+          SELECT group_concat(c.data, char(10))
+          FROM cells c
+          WHERE c.note_id = n.id
+          ORDER BY c.sort_order
+        ), '')
+      FROM notes n
+    `);
   } catch (err) {
     console.warn('FTS backfill failed:', err);
   }
@@ -183,7 +190,7 @@ function rowToNotebook(row: NotebookRow): Notebook {
 }
 
 // Convert database row to Note (without cells)
-function rowToNote(row: NoteRow, cells: Cell[] = [], tags: string[] = []): Note {
+function rowToNote(row: NoteRow, cells: Cell[] = [], tags: string[] = [], bodyLoaded = true): Note {
   return {
     id: row.id,
     notebookId: row.notebook_id,
@@ -196,6 +203,7 @@ function rowToNote(row: NoteRow, cells: Cell[] = [], tags: string[] = []): Note 
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     sourceUuid: row.source_uuid ?? undefined,
+    bodyLoaded,
   };
 }
 
@@ -209,6 +217,53 @@ function rowToCell(row: CellRow): Cell {
     diagramType: row.diagram_type ?? undefined,
     sortOrder: row.sort_order,
   };
+}
+
+const NOTE_HYDRATION_BATCH_SIZE = 500;
+
+async function hydrateNoteRows(rows: NoteRow[], includeCells = true): Promise<Note[]> {
+  if (rows.length === 0) return [];
+
+  const cellsByNote = new Map<string, Cell[]>();
+  const tagsByNote = new Map<string, string[]>();
+
+  for (let i = 0; i < rows.length; i += NOTE_HYDRATION_BATCH_SIZE) {
+    const noteIds = rows.slice(i, i + NOTE_HYDRATION_BATCH_SIZE).map(row => row.id);
+    const placeholders = noteIds.map(() => '?').join(', ');
+
+    if (includeCells) {
+      const cellRows = await getDb().select<CellRow[]>(
+        `SELECT * FROM cells WHERE note_id IN (${placeholders}) ORDER BY note_id, sort_order`,
+        noteIds
+      );
+      for (const row of cellRows) {
+        const cells = cellsByNote.get(row.note_id) ?? [];
+        cells.push(rowToCell(row));
+        cellsByNote.set(row.note_id, cells);
+      }
+    }
+
+    const tagRows = await getDb().select<{ note_id: string; name: string }[]>(
+      `SELECT nt.note_id, t.name
+       FROM note_tags nt
+       JOIN tags t ON t.id = nt.tag_id
+       WHERE nt.note_id IN (${placeholders})
+       ORDER BY nt.note_id, t.name`,
+      noteIds
+    );
+    for (const row of tagRows) {
+      const tags = tagsByNote.get(row.note_id) ?? [];
+      tags.push(row.name);
+      tagsByNote.set(row.note_id, tags);
+    }
+  }
+
+  return rows.map(row => rowToNote(
+    row,
+    includeCells ? cellsByNote.get(row.id) ?? [] : [],
+    tagsByNote.get(row.id) ?? [],
+    includeCells
+  ));
 }
 
 // ==================== NOTEBOOK OPERATIONS ====================
@@ -305,14 +360,14 @@ export async function getAllNotes(): Promise<Note[]> {
   const rows = await getDb().select<NoteRow[]>(
     'SELECT * FROM notes WHERE is_trashed = 0 ORDER BY sort_order, updated_at DESC'
   );
+  return hydrateNoteRows(rows);
+}
 
-  const notes: Note[] = [];
-  for (const row of rows) {
-    const cells = await getCellsByNote(row.id);
-    const tags = await getTagsForNote(row.id);
-    notes.push(rowToNote(row, cells, tags));
-  }
-  return notes;
+export async function getAllNoteSummaries(): Promise<Note[]> {
+  const rows = await getDb().select<NoteRow[]>(
+    'SELECT * FROM notes WHERE is_trashed = 0 ORDER BY sort_order, updated_at DESC'
+  );
+  return hydrateNoteRows(rows, false);
 }
 
 export async function getNotesByNotebook(notebookId: string): Promise<Note[]> {
@@ -320,42 +375,21 @@ export async function getNotesByNotebook(notebookId: string): Promise<Note[]> {
     'SELECT * FROM notes WHERE notebook_id = ? AND is_trashed = 0 ORDER BY sort_order, updated_at DESC',
     [notebookId]
   );
-
-  const notes: Note[] = [];
-  for (const row of rows) {
-    const cells = await getCellsByNote(row.id);
-    const tags = await getTagsForNote(row.id);
-    notes.push(rowToNote(row, cells, tags));
-  }
-  return notes;
+  return hydrateNoteRows(rows);
 }
 
 export async function getFavoriteNotes(): Promise<Note[]> {
   const rows = await getDb().select<NoteRow[]>(
     'SELECT * FROM notes WHERE is_favorite = 1 AND is_trashed = 0 ORDER BY updated_at DESC'
   );
-
-  const notes: Note[] = [];
-  for (const row of rows) {
-    const cells = await getCellsByNote(row.id);
-    const tags = await getTagsForNote(row.id);
-    notes.push(rowToNote(row, cells, tags));
-  }
-  return notes;
+  return hydrateNoteRows(rows);
 }
 
 export async function getTrashedNotes(): Promise<Note[]> {
   const rows = await getDb().select<NoteRow[]>(
     'SELECT * FROM notes WHERE is_trashed = 1 ORDER BY updated_at DESC'
   );
-
-  const notes: Note[] = [];
-  for (const row of rows) {
-    const cells = await getCellsByNote(row.id);
-    const tags = await getTagsForNote(row.id);
-    notes.push(rowToNote(row, cells, tags));
-  }
-  return notes;
+  return hydrateNoteRows(rows);
 }
 
 export async function getRecentNotes(limit = 20): Promise<Note[]> {
@@ -363,14 +397,7 @@ export async function getRecentNotes(limit = 20): Promise<Note[]> {
     'SELECT * FROM notes WHERE is_trashed = 0 ORDER BY updated_at DESC LIMIT ?',
     [limit]
   );
-
-  const notes: Note[] = [];
-  for (const row of rows) {
-    const cells = await getCellsByNote(row.id);
-    const tags = await getTagsForNote(row.id);
-    notes.push(rowToNote(row, cells, tags));
-  }
-  return notes;
+  return hydrateNoteRows(rows);
 }
 
 export async function getNote(id: string): Promise<Note | null> {
@@ -383,7 +410,7 @@ export async function getNote(id: string): Promise<Note | null> {
 
   const cells = await getCellsByNote(id);
   const tags = await getTagsForNote(id);
-  return rowToNote(rows[0], cells, tags);
+  return rowToNote(rows[0], cells, tags, true);
 }
 
 export async function getNoteBySourceUuid(sourceUuid: string): Promise<Note | null> {
@@ -396,7 +423,7 @@ export async function getNoteBySourceUuid(sourceUuid: string): Promise<Note | nu
 
   const cells = await getCellsByNote(rows[0].id);
   const tags = await getTagsForNote(rows[0].id);
-  return rowToNote(rows[0], cells, tags);
+  return rowToNote(rows[0], cells, tags, true);
 }
 
 export async function createNote(notebookId: string, title = 'Untitled', sourceUuid?: string): Promise<Note> {
@@ -431,6 +458,7 @@ export async function createNote(notebookId: string, title = 'Untitled', sourceU
     createdAt: now,
     updatedAt: now,
     sourceUuid,
+    bodyLoaded: true,
   };
 }
 
@@ -576,11 +604,11 @@ export async function updateCell(
     fields.push('type = ?');
     values.push(updates.type);
   }
-  if (updates.language !== undefined) {
+  if ('language' in updates) {
     fields.push('language = ?');
     values.push(updates.language ?? null);
   }
-  if (updates.diagramType !== undefined) {
+  if ('diagramType' in updates) {
     fields.push('diagram_type = ?');
     values.push(updates.diagramType ?? null);
   }
@@ -653,120 +681,132 @@ export async function moveCell(
   );
 }
 
+function normalizeMarkdown(md: string): string {
+  return md
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function normalizeInlineText(text: string): string {
+  return text.replace(/\s+/g, ' ');
+}
+
+function styleIncludes(style: string, pattern: RegExp): boolean {
+  return pattern.test(style.replace(/\s+/g, '').toLowerCase());
+}
+
+function renderChildren(node: Node, listDepth = 0): string {
+  return Array.from(node.childNodes)
+    .map(child => renderNode(child, listDepth))
+    .join('');
+}
+
+function renderBlock(content: string): string {
+  const cleaned = normalizeMarkdown(content);
+  return cleaned ? `${cleaned}\n\n` : '';
+}
+
+function renderList(list: Element, ordered: boolean, depth: number): string {
+  let index = 1;
+  return Array.from(list.children)
+    .filter(child => child.tagName.toLowerCase() === 'li')
+    .map(item => renderListItem(item, ordered, depth, index++))
+    .join('');
+}
+
+function renderListItem(item: Element, ordered: boolean, depth: number, index: number): string {
+  const indent = '  '.repeat(depth);
+  const marker = ordered ? `${index}. ` : '- ';
+  let content = '';
+  let nested = '';
+
+  for (const child of Array.from(item.childNodes)) {
+    if (child.nodeType === Node.ELEMENT_NODE) {
+      const tag = (child as Element).tagName.toLowerCase();
+      if (tag === 'ul' || tag === 'ol') {
+        nested += renderList(child as Element, tag === 'ol', depth + 1);
+        continue;
+      }
+    }
+    content += renderNode(child, depth);
+  }
+
+  const lines = normalizeMarkdown(content).split('\n').filter(Boolean);
+  const firstLine = lines.shift() ?? '';
+  const continuation = lines.map(line => `${indent}  ${line}`).join('\n');
+  const nestedBlock = nested ? `\n${nested.trimEnd()}` : '';
+  const textBlock = continuation ? `${firstLine}\n${continuation}` : firstLine;
+
+  return `${indent}${marker}${textBlock}${nestedBlock}\n`;
+}
+
+function renderNode(node: Node, listDepth = 0): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return normalizeInlineText(node.textContent ?? '');
+  }
+
+  if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+  const element = node as Element;
+  const tag = element.tagName.toLowerCase();
+  const children = () => renderChildren(element, listDepth);
+  const text = () => element.textContent ?? '';
+
+  if (tag === 'script' || tag === 'style' || tag === 'meta' || tag === 'link') return '';
+  if (tag === 'br') return '\n';
+  if (tag === 'hr') return '\n---\n\n';
+  if (tag === 'ul') return `${renderList(element, false, listDepth)}\n`;
+  if (tag === 'ol') return `${renderList(element, true, listDepth)}\n`;
+  if (tag === 'li') return renderListItem(element, false, listDepth, 1);
+  if (tag === 'pre') return `\n\`\`\`\n${text().replace(/\n+$/g, '')}\n\`\`\`\n\n`;
+  if (tag === 'code') return `\`${text().replace(/`/g, '\\`')}\``;
+  if (tag === 'blockquote') {
+    const quote = normalizeMarkdown(children());
+    return quote ? `${quote.split('\n').map(line => `> ${line}`).join('\n')}\n\n` : '';
+  }
+  if (/^h[1-6]$/.test(tag)) {
+    const level = Number(tag.slice(1));
+    return `${'#'.repeat(level)} ${normalizeMarkdown(children())}\n\n`;
+  }
+  if (tag === 'p' || tag === 'div' || tag === 'section' || tag === 'article') {
+    return renderBlock(children());
+  }
+  if (tag === 'a') {
+    const label = normalizeMarkdown(children()) || element.getAttribute('href') || '';
+    const href = element.getAttribute('href');
+    return href ? `[${label}](${href})` : label;
+  }
+  if (tag === 'strong' || tag === 'b') return `**${normalizeMarkdown(children())}**`;
+  if (tag === 'em' || tag === 'i') return `*${normalizeMarkdown(children())}*`;
+  if (tag === 's' || tag === 'strike' || tag === 'del') return `~~${normalizeMarkdown(children())}~~`;
+
+  const style = element.getAttribute('style') ?? '';
+  const rendered = children();
+  if (styleIncludes(style, /font-weight:(bold|[6-9]00)/)) return `**${normalizeMarkdown(rendered)}**`;
+  if (styleIncludes(style, /font-style:italic/)) return `*${normalizeMarkdown(rendered)}*`;
+
+  return rendered;
+}
+
 // Convert HTML to Markdown
 function htmlToMarkdown(html: string): string {
-  let md = html;
-
-  // First, handle nested formatting by processing from inside out
-  // Convert links: <a href="url" ...>content</a> -> [content](url)
-  // Also handle links without href (just extract text)
-  md = md.replace(/<a\s+[^>]*>([\s\S]*?)<\/a>/gi, (match, content) => {
-    // Try to extract href
-    const hrefMatch = match.match(/href="([^"]*)"/i);
-    const href = hrefMatch ? hrefMatch[1] : null;
-    // Strip any HTML tags from the link content
-    const cleanContent = content.replace(/<[^>]+>/g, '').trim();
-
-    if (href && cleanContent) {
-      return `[${cleanContent}](${href})`;
-    } else {
-      // No href or no content, just return the text
-      return cleanContent;
-    }
-  });
-
-  // Convert bold: <strong ...> or <b ...> -> **
-  md = md.replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, '**$2**');
-
-  // Convert italic: <em ...> or <i ...> -> *
-  md = md.replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, '*$2*');
-
-  // Convert underline: <u ...> -> just text (markdown doesn't support underline)
-  md = md.replace(/<u\b[^>]*>([\s\S]*?)<\/u>/gi, '$1');
-
-  // Convert strikethrough: <s>, <strike>, <del> -> ~~
-  md = md.replace(/<(s|strike|del)\b[^>]*>([\s\S]*?)<\/\1>/gi, '~~$2~~');
-
-  // Convert code: <code ...> -> `
-  md = md.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, '`$1`');
-
-  // Convert pre blocks
-  md = md.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, '\n```\n$1\n```\n');
-
-  // Convert headings (with any attributes)
-  md = md.replace(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi, (_, content) => `# ${content.replace(/<[^>]+>/g, '').trim()}\n`);
-  md = md.replace(/<h2\b[^>]*>([\s\S]*?)<\/h2>/gi, (_, content) => `## ${content.replace(/<[^>]+>/g, '').trim()}\n`);
-  md = md.replace(/<h3\b[^>]*>([\s\S]*?)<\/h3>/gi, (_, content) => `### ${content.replace(/<[^>]+>/g, '').trim()}\n`);
-  md = md.replace(/<h4\b[^>]*>([\s\S]*?)<\/h4>/gi, (_, content) => `#### ${content.replace(/<[^>]+>/g, '').trim()}\n`);
-  md = md.replace(/<h5\b[^>]*>([\s\S]*?)<\/h5>/gi, (_, content) => `##### ${content.replace(/<[^>]+>/g, '').trim()}\n`);
-  md = md.replace(/<h6\b[^>]*>([\s\S]*?)<\/h6>/gi, (_, content) => `###### ${content.replace(/<[^>]+>/g, '').trim()}\n`);
-
-  // Convert line breaks
-  md = md.replace(/<br\s*\/?>/gi, '\n');
-
-  // Convert blockquotes
-  md = md.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_, content) => {
-    const lines = content.replace(/<[^>]+>/g, '').trim().split('\n');
-    return lines.map((line: string) => `> ${line}`).join('\n') + '\n';
-  });
-
-  // Convert unordered lists
-  md = md.replace(/<ul\b[^>]*>([\s\S]*?)<\/ul>/gi, (_, content) => {
-    return content.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_: string, item: string) => {
-      return `- ${item.replace(/<[^>]+>/g, '').trim()}\n`;
-    });
-  });
-
-  // Convert ordered lists
-  let listCounter = 0;
-  md = md.replace(/<ol\b[^>]*>([\s\S]*?)<\/ol>/gi, (_, content) => {
-    listCounter = 0;
-    return content.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_: string, item: string) => {
-      listCounter++;
-      return `${listCounter}. ${item.replace(/<[^>]+>/g, '').trim()}\n`;
-    });
-  });
-
-  // Convert horizontal rules
-  md = md.replace(/<hr\b[^>]*\/?>/gi, '\n---\n');
-
-  // Convert paragraphs - extract content and add newlines
-  md = md.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, (_, content) => {
-    const clean = content.replace(/<[^>]+>/g, '').trim();
-    return clean ? clean + '\n\n' : '';
-  });
-
-  // Convert divs to newlines
-  md = md.replace(/<div\b[^>]*>([\s\S]*?)<\/div>/gi, '$1\n');
-
-  // Remove any remaining HTML tags
-  md = md.replace(/<[^>]+>/g, '');
-
-  // Decode HTML entities
-  md = md.replace(/&amp;/g, '&');
-  md = md.replace(/&lt;/g, '<');
-  md = md.replace(/&gt;/g, '>');
-  md = md.replace(/&quot;/g, '"');
-  md = md.replace(/&#39;/g, "'");
-  md = md.replace(/&nbsp;/g, ' ');
-  md = md.replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)));
-
-  // Clean up whitespace
-  md = md.replace(/[ \t]+$/gm, ''); // Trailing spaces
-  md = md.replace(/\n{3,}/g, '\n\n'); // Multiple newlines
-  md = md.trim();
-
-  return md;
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  return normalizeMarkdown(renderChildren(doc.body));
 }
 
 export async function convertCell(
   noteId: string,
   cellId: string,
   newType: CellType
-): Promise<void> {
+): Promise<Cell | null> {
   // Get current cell to check its type and data
   const cells = await getCellsByNote(noteId);
   const currentCell = cells.find(c => c.id === cellId);
+  if (!currentCell) return null;
+
   const currentType = currentCell?.type;
   const currentData = currentCell?.data || '';
 
@@ -790,6 +830,41 @@ export async function convertCell(
   }
 
   await updateCell(noteId, cellId, updates);
+  return { ...currentCell, ...updates };
+}
+
+// ==================== RESOURCE OPERATIONS ====================
+
+function rowToResource(row: ResourceRow): Resource {
+  return {
+    id: row.id,
+    noteId: row.note_id,
+    filename: row.filename,
+    mimeType: row.mime_type ?? undefined,
+    data: row.data,
+  };
+}
+
+export async function getResourcesByNote(noteId: string): Promise<Resource[]> {
+  const rows = await getDb().select<ResourceRow[]>(
+    'SELECT * FROM resources WHERE note_id = ?',
+    [noteId]
+  );
+  return rows.map(rowToResource);
+}
+
+export async function createResource(
+  noteId: string,
+  filename: string,
+  mimeType: string | undefined,
+  base64: string
+): Promise<Resource> {
+  const id = uuid();
+  await getDb().execute(
+    'INSERT INTO resources (id, note_id, filename, mime_type, data) VALUES (?, ?, ?, ?, ?)',
+    [id, noteId, filename, mimeType ?? null, base64]
+  );
+  return { id, noteId, filename, mimeType, data: base64 };
 }
 
 // ==================== TAG OPERATIONS ====================
@@ -820,14 +895,7 @@ export async function getNotesByTag(tagId: string): Promise<Note[]> {
      ORDER BY n.updated_at DESC`,
     [tagId]
   );
-
-  const notes: Note[] = [];
-  for (const row of rows) {
-    const cells = await getCellsByNote(row.id);
-    const tags = await getTagsForNote(row.id);
-    notes.push(rowToNote(row, cells, tags));
-  }
-  return notes;
+  return hydrateNoteRows(rows);
 }
 
 export async function createTag(name: string): Promise<Tag> {
@@ -864,8 +932,12 @@ async function updateNoteFTS(noteId: string): Promise<void> {
   const note = await getNote(noteId);
   if (!note) return;
 
-  // Combine all cell content for search
-  const content = note.cells.map(cell => cell.data).join('\n');
+  // Combine all cell content for search, dropping embedded resource refs so they
+  // don't pollute the index.
+  const content = note.cells
+    .map(cell => cell.data)
+    .join('\n')
+    .replace(/notch-resource:\/\/[\w-]+/g, ' ');
 
   // Remove existing entry
   await getDb().execute('DELETE FROM notes_fts WHERE note_id = ?', [noteId]);
@@ -894,10 +966,14 @@ export async function searchNotes(query: string): Promise<Note[]> {
 
   const ftsQuery = terms.map(term => `"${term}"*`).join(' OR ');
 
-  let rows: { note_id: string }[];
+  let rows: NoteRow[];
   try {
-    rows = await getDb().select<{ note_id: string }[]>(
-      `SELECT note_id FROM notes_fts WHERE notes_fts MATCH ? ORDER BY rank`,
+    rows = await getDb().select<NoteRow[]>(
+      `SELECT n.*
+       FROM notes_fts
+       JOIN notes n ON n.id = notes_fts.note_id
+       WHERE notes_fts MATCH ? AND n.is_trashed = 0
+       ORDER BY rank`,
       [ftsQuery]
     );
   } catch (err) {
@@ -907,14 +983,7 @@ export async function searchNotes(query: string): Promise<Note[]> {
     return [];
   }
 
-  const notes: Note[] = [];
-  for (const row of rows) {
-    const note = await getNote(row.note_id);
-    if (note && !note.isTrashed) {
-      notes.push(note);
-    }
-  }
-  return notes;
+  return hydrateNoteRows(rows);
 }
 
 // ==================== LINK REWRITING ====================
@@ -965,8 +1034,11 @@ export async function rewriteQuiverNoteLinks(): Promise<number> {
 // ==================== INITIALIZATION ====================
 
 export async function ensureInboxNotebook(): Promise<Notebook> {
-  const notebooks = await getAllNotebooks();
-  let inbox = notebooks.find(n => n.name === 'Inbox');
+  const rows = await getDb().select<NotebookRow[]>(
+    'SELECT * FROM notebooks WHERE name = ? LIMIT 1',
+    ['Inbox']
+  );
+  let inbox = rows.length > 0 ? rowToNotebook(rows[0]) : null;
 
   if (!inbox) {
     inbox = await createNotebook('Inbox');

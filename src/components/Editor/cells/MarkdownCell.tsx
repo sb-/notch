@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { marked } from 'marked';
-import hljs from 'highlight.js';
+import { renderMarkdown } from '../../../services/markdown';
+import { createResourceFromFile, useResourceVersion, RESOURCE_PROTOCOL } from '../../../services/resources';
 
 interface MarkdownCellProps {
+  noteId: string;
   data: string;
   onChange: (data: string) => void;
   onFocus: () => void;
@@ -12,48 +13,13 @@ interface MarkdownCellProps {
   onNavigateNext?: () => void;
 }
 
-// Configure marked with highlight.js and custom renderers
-marked.use({
-  gfm: true,
-  breaks: true,
-  // Disable auto-linking of raw URLs - only explicit [text](url) links should work
-  tokenizer: {
-    url() { return undefined; },
-  },
-  renderer: {
-    // Custom link renderer to preserve notch:// and quiver-note-url:// protocols
-    link(href: string, title: string | null | undefined, text: string) {
-      const titleAttr = title ? ` title="${title}"` : '';
-      return `<a href="${href}"${titleAttr}>${text}</a>`;
-    },
-    code(code: string, infostring?: string) {
-      const lang = infostring || '';
-      if (lang && hljs.getLanguage(lang)) {
-        try {
-          const highlighted = hljs.highlight(code, { language: lang }).value;
-          return `<pre><code class="hljs language-${lang}">${highlighted}</code></pre>`;
-        } catch {
-          // Fall through to default
-        }
-      }
-      return `<pre><code>${code}</code></pre>`;
-    },
-  },
-});
-
-export default function MarkdownCell({ data, onChange, onFocus, isFocused, onBackspaceEmpty, onNavigatePrev, onNavigateNext }: MarkdownCellProps) {
+export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocused, onBackspaceEmpty, onNavigatePrev, onNavigateNext }: MarkdownCellProps) {
   const [isEditing, setIsEditing] = useState(!data);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const wasFocused = useRef(isFocused);
+  const previewRef = useRef<HTMLDivElement>(null);
+  const resourceVersion = useResourceVersion();
 
-  const html = useMemo(() => {
-    if (!data) return '';
-    try {
-      return marked.parse(data) as string;
-    } catch {
-      return data;
-    }
-  }, [data]);
+  const html = useMemo(() => renderMarkdown(data), [data, resourceVersion]);
 
   useEffect(() => {
     if (isEditing && textareaRef.current) {
@@ -62,13 +28,10 @@ export default function MarkdownCell({ data, onChange, onFocus, isFocused, onBac
     }
   }, [isEditing]);
 
-  // Enter edit mode when this cell becomes the focused cell (matches
-  // text/code cell behavior — focus puts the cursor in the editable surface).
   useEffect(() => {
-    if (isFocused && !wasFocused.current && !isEditing) {
-      setIsEditing(true);
+    if (isFocused && !isEditing) {
+      previewRef.current?.focus();
     }
-    wasFocused.current = isFocused;
   }, [isFocused, isEditing]);
 
   const handleClick = (e: React.MouseEvent) => {
@@ -88,6 +51,47 @@ export default function MarkdownCell({ data, onChange, onFocus, isFocused, onBac
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     onChange(e.target.value);
+  };
+
+  // Insert markdown text at the current cursor position (or replace selection).
+  const insertAtCursor = (snippet: string) => {
+    const textarea = textareaRef.current;
+    const start = textarea?.selectionStart ?? data.length;
+    const end = textarea?.selectionEnd ?? data.length;
+    const next = data.slice(0, start) + snippet + data.slice(end);
+    onChange(next);
+    setTimeout(() => {
+      if (textarea) {
+        const pos = start + snippet.length;
+        textarea.selectionStart = textarea.selectionEnd = pos;
+      }
+    }, 0);
+  };
+
+  const insertImageFiles = async (files: File[]) => {
+    const images = files.filter(file => file.type.startsWith('image/'));
+    if (images.length === 0) return;
+    for (const file of images) {
+      const id = await createResourceFromFile(noteId, file);
+      const alt = file.name.replace(/\.[^.]+$/, '');
+      insertAtCursor(`\n![${alt}](${RESOURCE_PROTOCOL}${id})\n`);
+    }
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.clipboardData.files);
+    if (files.some(file => file.type.startsWith('image/'))) {
+      e.preventDefault();
+      void insertImageFiles(files);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.dataTransfer.files);
+    if (files.some(file => file.type.startsWith('image/'))) {
+      e.preventDefault();
+      void insertImageFiles(files);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -148,15 +152,21 @@ export default function MarkdownCell({ data, onChange, onFocus, isFocused, onBac
         className="cell-editor"
         value={data}
         onChange={handleChange}
+        onFocus={onFocus}
         onBlur={handleBlur}
         onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
+        onDrop={handleDrop}
       />
     );
   }
 
   return (
     <div
+      ref={previewRef}
       className="markdown-preview"
+      tabIndex={-1}
+      onFocus={onFocus}
       onClick={handleClick}
       dangerouslySetInnerHTML={{ __html: html }}
     />

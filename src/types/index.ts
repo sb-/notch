@@ -27,6 +27,7 @@ export interface Note {
   createdAt: number;
   updatedAt: number;
   sourceUuid?: string; // Original UUID from imported notes (e.g., Quiver)
+  bodyLoaded?: boolean;
 }
 
 // Notebook is a container for notes
@@ -45,13 +46,15 @@ export interface Tag {
   name: string;
 }
 
-// Resource represents an embedded file (image, attachment)
+// Resource represents an embedded file (image, attachment).
+// `data` is the file contents encoded as base64 (stored as TEXT in SQLite, since
+// the SQL plugin can't reliably bind binary blobs from JS).
 export interface Resource {
   id: string;
   noteId: string;
   filename: string;
   mimeType?: string;
-  data: Uint8Array;
+  data: string;
 }
 
 // Special collection types for the sidebar
@@ -125,6 +128,7 @@ export interface AppActions {
   deleteCell: (noteId: string, cellId: string) => Promise<void>;
   moveCell: (noteId: string, cellId: string, newIndex: number) => Promise<void>;
   convertCell: (noteId: string, cellId: string, newType: CellType) => Promise<void>;
+  undoLastCellConversion: () => Promise<boolean>;
 
   // Tag actions
   createTag: (name: string) => Promise<Tag>;
@@ -141,7 +145,8 @@ export interface AppActions {
   setSortOrder: (order: SortOrder) => void;
 
   // Data loading
-  loadData: () => Promise<void>;
+  loadData: (databasePath?: string) => Promise<void>;
+  loadNoteBody: (id: string) => Promise<void>;
 }
 
 // Database row types (matching SQLite schema)
@@ -191,7 +196,7 @@ export interface ResourceRow {
   note_id: string;
   filename: string;
   mime_type: string | null;
-  data: Uint8Array;
+  data: string; // base64
 }
 
 // Quiver import types (for .qvlibrary parsing)

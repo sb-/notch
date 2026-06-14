@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useStore, useNotebooks, useTags } from '../../store';
 import type { Notebook, SpecialCollection } from '../../types';
+import type { LibraryInfo } from '../../services/libraries';
 import { getNotebookSubtreeIds, isDescendantOf } from '../../utils/notebooks';
 
 interface NoteCounts {
@@ -225,12 +226,25 @@ function NotebookTreeItem({
   );
 }
 
-export default function Sidebar() {
+interface SidebarProps {
+  libraries?: LibraryInfo[];
+  activeLibraryId?: string;
+  onSelectLibrary?: (libraryId: string) => void;
+  onCreateLibrary?: () => void;
+}
+
+export default function Sidebar({
+  libraries = [],
+  activeLibraryId,
+  onSelectLibrary,
+  onCreateLibrary,
+}: SidebarProps = {}) {
   const [activeTab, setActiveTab] = useState<'notebooks' | 'tags'>('notebooks');
   const [newItemName, setNewItemName] = useState('');
   const [showNewInput, setShowNewInput] = useState(false);
   const [filterText, setFilterText] = useState('');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; notebookId: string } | null>(null);
+  const [showLibraryMenu, setShowLibraryMenu] = useState(false);
   const [expandedNotebooks, setExpandedNotebooks] = useState<Set<string>>(new Set());
   const [newNotebookParentId, setNewNotebookParentId] = useState<string | null>(null);
   const [showMoveSubmenu, setShowMoveSubmenu] = useState(false);
@@ -251,6 +265,7 @@ export default function Sidebar() {
   const deleteNotebook = useStore(state => state.deleteNotebook);
   const createNote = useStore(state => state.createNote);
   const updateNotebook = useStore(state => state.updateNotebook);
+  const activeLibrary = libraries.find(library => library.id === activeLibraryId) ?? libraries[0];
 
   // Calculate note counts
   const counts: NoteCounts = {
@@ -423,6 +438,47 @@ export default function Sidebar() {
 
   return (
     <div className="sidebar">
+      {activeLibrary && (
+        <div className="library-switcher">
+          <button
+            className="library-switcher-button"
+            onClick={() => setShowLibraryMenu(show => !show)}
+            title="Switch Library"
+          >
+            <span className="library-switcher-name">{activeLibrary.name}</span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </button>
+          {showLibraryMenu && (
+            <div className="library-menu">
+              {libraries.map(library => (
+                <button
+                  key={library.id}
+                  className={`library-menu-item ${library.id === activeLibrary.id ? 'active' : ''}`}
+                  onClick={() => {
+                    onSelectLibrary?.(library.id);
+                    setShowLibraryMenu(false);
+                  }}
+                >
+                  {library.name}
+                </button>
+              ))}
+              <div className="context-menu-separator" />
+              <button
+                className="library-menu-item"
+                onClick={() => {
+                  onCreateLibrary?.();
+                  setShowLibraryMenu(false);
+                }}
+              >
+                New Library...
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Tab Toggle */}
       <div className="sidebar-tabs">
         <button
@@ -572,13 +628,13 @@ export default function Sidebar() {
         </button>
         <div className="sidebar-search">
           <span className="sidebar-search-icon">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
               <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
             </svg>
           </span>
           <input
             type="text"
-            placeholder="Filter by keyword, title or #tag"
+            placeholder="Filter"
             value={filterText}
             onChange={e => setFilterText(e.target.value)}
           />

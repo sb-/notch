@@ -1,10 +1,12 @@
+import { Suspense, lazy } from 'react';
 import { useStore } from '../../store';
 import type { Cell } from '../../types';
 import TextCell from './cells/TextCell';
-import CodeCell from './cells/CodeCell';
-import MarkdownCell from './cells/MarkdownCell';
-import LatexCell from './cells/LatexCell';
-import DiagramCell from './cells/DiagramCell';
+
+const CodeCell = lazy(() => import('./cells/CodeCell'));
+const MarkdownCell = lazy(() => import('./cells/MarkdownCell'));
+const LatexCell = lazy(() => import('./cells/LatexCell'));
+const DiagramCell = lazy(() => import('./cells/DiagramCell'));
 
 interface CellContainerProps {
   noteId: string;
@@ -60,7 +62,7 @@ export default function CellContainer({
 
     switch (cell.type) {
       case 'text':
-        return <TextCell {...commonProps} />;
+        return <TextCell {...commonProps} noteId={noteId} />;
       case 'code':
         return (
           <CodeCell
@@ -70,7 +72,7 @@ export default function CellContainer({
           />
         );
       case 'markdown':
-        return <MarkdownCell {...commonProps} />;
+        return <MarkdownCell {...commonProps} noteId={noteId} />;
       case 'latex':
         return <LatexCell {...commonProps} />;
       case 'diagram':
@@ -82,7 +84,7 @@ export default function CellContainer({
           />
         );
       default:
-        return <TextCell {...commonProps} />;
+        return <TextCell {...commonProps} noteId={noteId} />;
     }
   };
 
@@ -91,7 +93,11 @@ export default function CellContainer({
       className={`cell cell-${cell.type} ${isFocused ? 'focused' : ''}`}
       onClick={onFocus}
     >
-      <div className="cell-content">{renderCell()}</div>
+      <div className="cell-content">
+        <Suspense fallback={<div className="cell-loading" aria-label="Loading cell" />}>
+          {renderCell()}
+        </Suspense>
+      </div>
     </div>
   );
 }

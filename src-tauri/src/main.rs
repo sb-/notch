@@ -34,6 +34,9 @@ fn main() {
                 "new_notebook" => {
                     let _ = window.eval("window.__NOTCH__.newNotebook()");
                 }
+                "new_library" => {
+                    let _ = window.eval("window.__NOTCH__.newLibrary()");
+                }
                 "import" => {
                     let _ = window.eval("window.__NOTCH__.importLibrary()");
                 }
@@ -42,6 +45,12 @@ fn main() {
                 }
                 "export_library" => {
                     let _ = window.eval("window.__NOTCH__.exportLibrary()");
+                }
+                "search_all_notes" => {
+                    let _ = window.eval("window.__NOTCH__.searchAllNotes()");
+                }
+                "find_in_note" => {
+                    let _ = window.eval("window.__NOTCH__.findInNote()");
                 }
                 "toggle_sidebar" => {
                     let _ = window.eval("window.__NOTCH__.toggleSidebar()");
@@ -97,11 +106,36 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
         true,
         &[
             &MenuItem::with_id(handle, "new_note", "New Note", true, Some("CmdOrCtrl+N"))?,
-            &MenuItem::with_id(handle, "new_notebook", "New Notebook", true, Some("CmdOrCtrl+Shift+N"))?,
+            &MenuItem::with_id(
+                handle,
+                "new_notebook",
+                "New Notebook",
+                true,
+                Some("CmdOrCtrl+Shift+N"),
+            )?,
+            &MenuItem::with_id(handle, "new_library", "New Library...", true, None::<&str>)?,
             &PredefinedMenuItem::separator(handle)?,
-            &MenuItem::with_id(handle, "import", "Import Quiver Library...", true, Some("CmdOrCtrl+Shift+I"))?,
-            &MenuItem::with_id(handle, "export", "Export Note...", true, Some("CmdOrCtrl+Shift+E"))?,
-            &MenuItem::with_id(handle, "export_library", "Export Library...", true, None::<&str>)?,
+            &MenuItem::with_id(
+                handle,
+                "import",
+                "Import Quiver Library...",
+                true,
+                Some("CmdOrCtrl+Shift+I"),
+            )?,
+            &MenuItem::with_id(
+                handle,
+                "export",
+                "Export Note...",
+                true,
+                Some("CmdOrCtrl+Shift+E"),
+            )?,
+            &MenuItem::with_id(
+                handle,
+                "export_library",
+                "Export Library...",
+                true,
+                None::<&str>,
+            )?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::close_window(handle, None)?,
         ],
@@ -120,6 +154,21 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
             &PredefinedMenuItem::copy(handle, None)?,
             &PredefinedMenuItem::paste(handle, None)?,
             &PredefinedMenuItem::select_all(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(
+                handle,
+                "find_in_note",
+                "Find in Note...",
+                true,
+                Some("CmdOrCtrl+F"),
+            )?,
+            &MenuItem::with_id(
+                handle,
+                "search_all_notes",
+                "Search All Notes...",
+                true,
+                Some("CmdOrCtrl+Shift+F"),
+            )?,
         ],
     )?;
 
@@ -129,15 +178,57 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
         "View",
         true,
         &[
-            &MenuItem::with_id(handle, "toggle_sidebar", "Toggle Sidebar", true, Some("CmdOrCtrl+0"))?,
+            &MenuItem::with_id(
+                handle,
+                "toggle_sidebar",
+                "Toggle Sidebar",
+                true,
+                Some("CmdOrCtrl+0"),
+            )?,
             &PredefinedMenuItem::separator(handle)?,
-            &MenuItem::with_id(handle, "single_pane", "Single Pane", true, Some("CmdOrCtrl+1"))?,
-            &MenuItem::with_id(handle, "double_pane", "Two Panes", true, Some("CmdOrCtrl+2"))?,
-            &MenuItem::with_id(handle, "triple_pane", "Three Panes", true, Some("CmdOrCtrl+3"))?,
+            &MenuItem::with_id(
+                handle,
+                "single_pane",
+                "Single Pane",
+                true,
+                Some("CmdOrCtrl+1"),
+            )?,
+            &MenuItem::with_id(
+                handle,
+                "double_pane",
+                "Two Panes",
+                true,
+                Some("CmdOrCtrl+2"),
+            )?,
+            &MenuItem::with_id(
+                handle,
+                "triple_pane",
+                "Three Panes",
+                true,
+                Some("CmdOrCtrl+3"),
+            )?,
             &PredefinedMenuItem::separator(handle)?,
-            &MenuItem::with_id(handle, "editor_only", "Editor Only", true, Some("CmdOrCtrl+4"))?,
-            &MenuItem::with_id(handle, "preview_only", "Preview Only", true, Some("CmdOrCtrl+5"))?,
-            &MenuItem::with_id(handle, "split_view", "Side by Side", true, Some("CmdOrCtrl+6"))?,
+            &MenuItem::with_id(
+                handle,
+                "editor_only",
+                "Editor Only",
+                true,
+                Some("CmdOrCtrl+4"),
+            )?,
+            &MenuItem::with_id(
+                handle,
+                "preview_only",
+                "Preview Only",
+                true,
+                Some("CmdOrCtrl+5"),
+            )?,
+            &MenuItem::with_id(
+                handle,
+                "split_view",
+                "Side by Side",
+                true,
+                Some("CmdOrCtrl+6"),
+            )?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::fullscreen(handle, None)?,
         ],
@@ -161,9 +252,13 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
         handle,
         "Help",
         true,
-        &[
-            &MenuItem::with_id(handle, "documentation", "Documentation", true, None::<&str>)?,
-        ],
+        &[&MenuItem::with_id(
+            handle,
+            "documentation",
+            "Documentation",
+            true,
+            None::<&str>,
+        )?],
     )?;
 
     Menu::with_items(

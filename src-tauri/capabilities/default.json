@@ -27,6 +27,15 @@
         { "path": "$DESKTOP/**" }
       ]
     },
+    {
+      "identifier": "fs:allow-read-file",
+      "allow": [
+        { "path": "$HOME/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$DESKTOP/**" }
+      ]
+    },
     "fs:default",
     "fs:allow-write-text-file",
     "fs:allow-mkdir",

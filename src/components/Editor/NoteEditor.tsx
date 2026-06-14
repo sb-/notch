@@ -1,10 +1,29 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { Suspense, lazy, useState, useCallback, useRef, useEffect } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
+import { readFile } from '@tauri-apps/plugin-fs';
 import { useStore, useSelectedNote, useEditorViewMode, useNotebooks } from '../../store';
 import CellContainer from './CellContainer';
-import NotePreview from '../Preview/NotePreview';
 import FindBar from '../Search/FindBar';
 import { copyNoteLink } from '../NoteList/NoteListItem';
-import type { CellType, EditorViewMode } from '../../types';
+import {
+  loadResourcesForNote,
+  createResourceFromBase64,
+  bytesToBase64,
+  RESOURCE_PROTOCOL,
+} from '../../services/resources';
+import type { CellType, EditorViewMode, Note } from '../../types';
+
+const NotePreview = lazy(() => import('../Preview/NotePreview'));
+
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  bmp: 'image/bmp',
+};
 
 const cellTypes: { type: CellType; label: string }[] = [
   { type: 'text', label: 'Text Cell' },
@@ -20,13 +39,16 @@ interface NoteEditorProps {
 }
 
 export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorProps = {}) {
-  const note = useSelectedNote();
+  const selectedNote = useSelectedNote();
+  const lastLoadedNoteRef = useRef<Note | null>(null);
   const notebooks = useNotebooks();
   const editorViewMode = useEditorViewMode();
   const updateNote = useStore(state => state.updateNote);
   const toggleFavorite = useStore(state => state.toggleFavorite);
   const addCell = useStore(state => state.addCell);
   const deleteCell = useStore(state => state.deleteCell);
+  const updateCell = useStore(state => state.updateCell);
+  const moveCell = useStore(state => state.moveCell);
   const setEditorViewMode = useStore(state => state.setEditorViewMode);
   const tags = useStore(state => state.tags);
   const addTagToNote = useStore(state => state.addTagToNote);
@@ -39,18 +61,35 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   const [focusedCellId, setFocusedCellId] = useState<string | null>(null);
   const [newTagName, setNewTagName] = useState('');
   const contentRef = useRef<HTMLDivElement>(null);
+  const pendingNoteSwitch = Boolean(selectedNote && !selectedNote.bodyLoaded);
+  const note = pendingNoteSwitch ? lastLoadedNoteRef.current : selectedNote;
+  const showingPreviousNote = Boolean(pendingNoteSwitch && note);
 
-  // Get the focused cell's type for the toolbar
-  const focusedCell = note?.cells.find(c => c.id === focusedCellId);
+  useEffect(() => {
+    if (selectedNote?.bodyLoaded) {
+      lastLoadedNoteRef.current = selectedNote;
+    }
+  }, [selectedNote]);
+
+  useEffect(() => {
+    if (showingPreviousNote && document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+  }, [showingPreviousNote, selectedNote?.id]);
+
+  // Resolve focus synchronously so the toolbar does not briefly fall back to
+  // "Text Cell" while focusedCellId catches up after a note/cell switch.
+  const focusedCell = note?.cells.find(c => c.id === focusedCellId) ?? note?.cells[0] ?? null;
+  const effectiveFocusedCellId = focusedCell?.id ?? null;
   const currentCellType = focusedCell?.type || 'text';
 
   const handleTitleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      if (note) {
+      if (note && !showingPreviousNote) {
         updateNote(note.id, { title: e.target.value });
       }
     },
-    [note, updateNote]
+    [note, showingPreviousNote, updateNote]
   );
 
   const handleViewModeChange = (mode: EditorViewMode) => {
@@ -58,7 +97,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   };
 
   const handleAddTag = async (tagId: string) => {
-    if (note) {
+    if (note && !showingPreviousNote) {
       const tag = tags.find(t => t.id === tagId);
       if (tag && !note.tags.includes(tag.name)) {
         await addTagToNote(note.id, tagId);
@@ -68,7 +107,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   };
 
   const handleCreateAndAddTag = async () => {
-    if (note && newTagName.trim()) {
+    if (note && !showingPreviousNote && newTagName.trim()) {
       const tag = await createTag(newTagName.trim());
       await addTagToNote(note.id, tag.id);
       setNewTagName('');
@@ -77,7 +116,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   };
 
   const handleRemoveTag = async (tagName: string) => {
-    if (note) {
+    if (note && !showingPreviousNote) {
       const tag = tags.find(t => t.name === tagName);
       if (tag) {
         await removeTagFromNote(note.id, tag.id);
@@ -86,16 +125,16 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   };
 
   const handleMoveToNotebook = async (notebookId: string) => {
-    if (note) {
+    if (note && !showingPreviousNote) {
       await updateNote(note.id, { notebookId });
     }
     setShowNotebookMenu(false);
   };
 
   const handleCellTypeChange = async (type: CellType) => {
-    if (note && focusedCellId) {
+    if (note && !showingPreviousNote && effectiveFocusedCellId) {
       const convertCell = useStore.getState().convertCell;
-      await convertCell(note.id, focusedCellId, type);
+      await convertCell(note.id, effectiveFocusedCellId, type);
     }
     setShowCellTypeMenu(false);
   };
@@ -107,7 +146,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   };
 
   const handleDeleteCell = useCallback(async (cellId: string) => {
-    if (!note || note.cells.length <= 1) return; // Don't delete the last cell
+    if (!note || showingPreviousNote || note.cells.length <= 1) return; // Don't delete the last cell
 
     const cellIndex = note.cells.findIndex(c => c.id === cellId);
     await deleteCell(note.id, cellId);
@@ -118,7 +157,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
     if (remainingCells[newFocusIndex]) {
       setFocusedCellId(remainingCells[newFocusIndex].id);
     }
-  }, [note, deleteCell]);
+  }, [note, showingPreviousNote, deleteCell]);
 
   const handleNavigatePrev = useCallback((cellId: string) => {
     if (!note) return;
@@ -138,17 +177,17 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
 
   // Handle Shift+Enter to add new cell
   const handleKeyDown = useCallback(async (e: React.KeyboardEvent) => {
-    if (e.shiftKey && e.key === 'Enter' && note) {
+    if (e.shiftKey && e.key === 'Enter' && note && !showingPreviousNote) {
       e.preventDefault();
-      const afterCellId = focusedCellId || note.cells[note.cells.length - 1]?.id;
+      const afterCellId = effectiveFocusedCellId || note.cells[note.cells.length - 1]?.id;
       const newCell = await addCell(note.id, currentCellType, afterCellId);
       setFocusedCellId(newCell.id);
     }
-  }, [note, focusedCellId, currentCellType, addCell]);
+  }, [note, showingPreviousNote, effectiveFocusedCellId, currentCellType, addCell]);
 
   // Create default cell if note has no cells, and auto-focus first cell
   useEffect(() => {
-    if (note) {
+    if (note?.bodyLoaded) {
       if (note.cells.length === 0) {
         addCell(note.id, 'text').then(cell => {
           setFocusedCellId(cell.id);
@@ -158,9 +197,84 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
         setFocusedCellId(note.cells[0].id);
       }
     }
-  }, [note?.id, note?.cells.length, addCell, focusedCellId]);
+  }, [note?.id, note?.bodyLoaded, note?.cells.length, addCell, focusedCellId]);
+
+  // Load this note's image/attachment resources into the render cache.
+  useEffect(() => {
+    if (note?.id && note.bodyLoaded) {
+      loadResourcesForNote(note.id);
+    }
+  }, [note?.id, note?.bodyLoaded]);
+
+  // Cmd+Alt+Up / Cmd+Alt+Down moves the focused cell. Capture phase so it wins
+  // over Monaco/textarea handling regardless of which cell type has focus.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!e.metaKey || !e.altKey) return;
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      if (!note || showingPreviousNote || !effectiveFocusedCellId) return;
+      const index = note.cells.findIndex(c => c.id === effectiveFocusedCellId);
+      if (index === -1) return;
+      const target = e.key === 'ArrowUp' ? index - 1 : index + 1;
+      if (target < 0 || target >= note.cells.length) return;
+      e.preventDefault();
+      e.stopPropagation();
+      moveCell(note.id, effectiveFocusedCellId, target);
+    };
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, [note, showingPreviousNote, effectiveFocusedCellId, moveCell]);
+
+  const handleInsertImage = useCallback(async () => {
+    if (!note || showingPreviousNote) return;
+    const selected = await open({
+      multiple: false,
+      title: 'Insert Image',
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'] }],
+    });
+    if (!selected) return;
+
+    const path = selected as string;
+    const name = path.split('/').pop() || 'image';
+    const ext = name.split('.').pop()?.toLowerCase() || '';
+    const mime = IMAGE_MIME_BY_EXT[ext] || 'application/octet-stream';
+    const bytes = await readFile(path);
+    const id = await createResourceFromBase64(note.id, name, mime, bytesToBase64(bytes));
+    const alt = name.replace(/\.[^.]+$/, '');
+    const ref = `![${alt}](${RESOURCE_PROTOCOL}${id})`;
+
+    const focused = note.cells.find(c => c.id === effectiveFocusedCellId);
+    if (focused && focused.type === 'markdown') {
+      const sep = focused.data.trim() ? '\n\n' : '';
+      await updateCell(note.id, focused.id, { data: `${focused.data}${sep}${ref}\n` });
+    } else {
+      const cell = await addCell(note.id, 'markdown', effectiveFocusedCellId ?? undefined);
+      await updateCell(note.id, cell.id, { data: `${ref}\n` });
+      setFocusedCellId(cell.id);
+    }
+  }, [note, showingPreviousNote, effectiveFocusedCellId, addCell, updateCell]);
 
   if (!note) {
+    if (pendingNoteSwitch) {
+      return (
+        <div className="editor">
+          <div className="editor-title">
+            <input
+              type="text"
+              className="editor-title-input"
+              value={selectedNote?.title ?? ''}
+              readOnly
+              placeholder="Untitled"
+            />
+          </div>
+          <div className="empty-state">
+            <div className="inline-loading-indicator" aria-hidden="true" />
+            <div className="empty-state-title">Opening note...</div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="editor">
         <div className="empty-state">
@@ -181,7 +295,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
             key={cell.id}
             noteId={note.id}
             cell={cell}
-            isFocused={focusedCellId === cell.id}
+            isFocused={effectiveFocusedCellId === cell.id}
             onFocus={() => setFocusedCellId(cell.id)}
             onDelete={() => handleDeleteCell(cell.id)}
             canDelete={note.cells.length > 1}
@@ -195,12 +309,14 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
 
   const renderPreview = () => (
     <div className="editor-content">
-      <NotePreview note={note} />
+      <Suspense fallback={<div className="preview-loading" aria-label="Loading preview" />}>
+        <NotePreview note={note} />
+      </Suspense>
     </div>
   );
 
   return (
-    <div className="editor">
+    <div className={`editor ${showingPreviousNote ? 'pending-note-switch' : ''}`}>
       {/* Note Metadata Header */}
       <div className="editor-header">
         <div className="editor-header-row">
@@ -363,13 +479,14 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
 
       {/* Title */}
       <div className="editor-title" onClick={closeAllMenus}>
-        <input
-          type="text"
-          className="editor-title-input"
-          value={note.title}
-          onChange={handleTitleChange}
-          placeholder="Untitled"
-        />
+          <input
+            type="text"
+            className="editor-title-input"
+            value={note.title}
+            onChange={handleTitleChange}
+            readOnly={showingPreviousNote}
+            placeholder="Untitled"
+          />
       </div>
 
       {/* Content */}
@@ -407,11 +524,15 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
             <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
           </svg>
         </button>
-        <button className="editor-footer-btn" title="More Options">
+        <button
+          className="editor-footer-btn"
+          title="Insert Image"
+          onClick={handleInsertImage}
+        >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <circle cx="12" cy="12" r="1"/>
-            <circle cx="19" cy="12" r="1"/>
-            <circle cx="5" cy="12" r="1"/>
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21 15 16 10 5 21"/>
           </svg>
         </button>
       </div>

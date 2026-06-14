@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useStore, useNotes, useNotebooks } from '../../store';
 import NoteListItem from './NoteListItem';
 import type { SortBy } from '../../types';
@@ -36,7 +36,11 @@ const sortOptions: { value: SortBy; label: string }[] = [
   { value: 'title', label: 'Title' },
 ];
 
-export default function NoteList() {
+interface NoteListProps {
+  onOpenSearch?: () => void;
+}
+
+export default function NoteList({ onOpenSearch }: NoteListProps = {}) {
   const [showSortMenu, setShowSortMenu] = useState(false);
 
   const notes = useNotes();
@@ -53,6 +57,10 @@ export default function NoteList() {
   const setSortBy = useStore(state => state.setSortBy);
 
   const title = getTitle(selectedCollection, selectedNotebookId, selectedTagId, notebooks, tags);
+
+  const handleSelectNote = useCallback((noteId: string) => {
+    void selectNote(noteId);
+  }, [selectNote]);
 
   // Filter and sort notes
   const displayNotes = useMemo(() => {
@@ -146,6 +154,14 @@ export default function NoteList() {
         <div className="note-list-notebook">
           {title}
         </div>
+        {onOpenSearch && (
+          <button className="note-list-search-btn" onClick={onOpenSearch} title="Search All Notes (⌘⇧F)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="11" cy="11" r="8" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* Sort */}
@@ -187,7 +203,7 @@ export default function NoteList() {
               key={note.id}
               note={note}
               isSelected={selectedNoteId === note.id}
-              onClick={() => selectNote(note.id)}
+              onSelect={handleSelectNote}
             />
           ))
         )}

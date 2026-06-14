@@ -17,6 +17,9 @@ import { getNotebookSubtreeIds } from '../utils/notebooks';
 
 type Store = AppState & AppActions;
 
+const conversionUndoStack: { noteId: string; cell: Cell }[] = [];
+const noteBodyLoadPromises = new Map<string, Promise<void>>();
+
 export const useStore = create<Store>((set, get) => ({
   // Initial UI state
   layoutMode: 'triple',
@@ -58,15 +61,24 @@ export const useStore = create<Store>((set, get) => ({
     const notesInNotebook = id
       ? state.notes.filter(n => notebookIds.has(n.notebookId) && !n.isTrashed)
       : [];
+    const selectedNoteId = notesInNotebook[0]?.id ?? null;
     set({
       selectedNotebookId: id,
       selectedCollection: null,
       selectedTagId: null,
-      selectedNoteId: notesInNotebook[0]?.id ?? null,
+      selectedNoteId,
     });
+    if (selectedNoteId) {
+      void get().loadNoteBody(selectedNoteId);
+    }
   },
 
-  selectNote: (id: string | null) => set({ selectedNoteId: id }),
+  selectNote: async (id: string | null) => {
+    set({ selectedNoteId: id });
+    if (id) {
+      await get().loadNoteBody(id);
+    }
+  },
 
   selectCollection: async (collection: SpecialCollection | null) => {
     const state = get();
@@ -100,12 +112,16 @@ export const useStore = create<Store>((set, get) => ({
       }
     }
 
+    const selectedNoteId = filteredNotes[0]?.id ?? null;
     set({
       selectedCollection: collection,
       selectedNotebookId: null,
       selectedTagId: null,
-      selectedNoteId: filteredNotes[0]?.id ?? null,
+      selectedNoteId,
     });
+    if (selectedNoteId) {
+      void get().loadNoteBody(selectedNoteId);
+    }
   },
 
   selectTag: async (id: string | null) => {
@@ -118,12 +134,16 @@ export const useStore = create<Store>((set, get) => ({
       filteredNotes = allNotes.filter(n => n.tags.includes(tag.name) && !n.isTrashed);
     }
 
+    const selectedNoteId = filteredNotes[0]?.id ?? null;
     set({
       selectedTagId: id,
       selectedNotebookId: null,
       selectedCollection: null,
-      selectedNoteId: filteredNotes[0]?.id ?? null,
+      selectedNoteId,
     });
+    if (selectedNoteId) {
+      void get().loadNoteBody(selectedNoteId);
+    }
   },
 
   // ==================== NOTEBOOK ACTIONS ====================
@@ -174,12 +194,17 @@ export const useStore = create<Store>((set, get) => ({
   deleteNote: async (id: string, permanent = false) => {
     await db.deleteNote(id, permanent);
     if (permanent) {
-      set(state => ({
+      const state = get();
+      const nextSelectedNoteId = state.selectedNoteId === id
+        ? state.notes.find(n => n.id !== id)?.id ?? null
+        : state.selectedNoteId;
+      set({
         notes: state.notes.filter(n => n.id !== id),
-        selectedNoteId: state.selectedNoteId === id
-          ? state.notes.find(n => n.id !== id)?.id ?? null
-          : state.selectedNoteId,
-      }));
+        selectedNoteId: nextSelectedNoteId,
+      });
+      if (nextSelectedNoteId) {
+        void get().loadNoteBody(nextSelectedNoteId);
+      }
     } else {
       set(state => ({
         notes: state.notes.map(n =>
@@ -281,31 +306,52 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   convertCell: async (noteId: string, cellId: string, newType: CellType) => {
-    await db.convertCell(noteId, cellId, newType);
+    const previousCell = get()
+      .notes.find(n => n.id === noteId)
+      ?.cells.find(c => c.id === cellId);
+
+    const convertedCell = await db.convertCell(noteId, cellId, newType);
+    if (!convertedCell) return;
+
+    if (previousCell && previousCell.type !== newType) {
+      conversionUndoStack.push({ noteId, cell: { ...previousCell } });
+    }
+
     set(state => ({
       notes: state.notes.map(n => {
         if (n.id !== noteId) return n;
         return {
           ...n,
-          cells: n.cells.map(c => {
-            if (c.id !== cellId) return c;
-            const updated: Cell = { ...c, type: newType };
-            if (newType === 'code') {
-              updated.language = 'javascript';
-              delete updated.diagramType;
-            } else if (newType === 'diagram') {
-              updated.diagramType = 'flow';
-              delete updated.language;
-            } else {
-              delete updated.language;
-              delete updated.diagramType;
-            }
-            return updated;
-          }),
+          cells: n.cells.map(c => c.id === cellId ? convertedCell : c),
           updatedAt: Date.now(),
         };
       }),
     }));
+  },
+
+  undoLastCellConversion: async () => {
+    const undo = conversionUndoStack.pop();
+    if (!undo) return false;
+
+    await db.updateCell(undo.noteId, undo.cell.id, {
+      type: undo.cell.type,
+      data: undo.cell.data,
+      language: undo.cell.language,
+      diagramType: undo.cell.diagramType,
+    });
+
+    set(state => ({
+      notes: state.notes.map(n => {
+        if (n.id !== undo.noteId) return n;
+        return {
+          ...n,
+          cells: n.cells.map(c => c.id === undo.cell.id ? { ...undo.cell } : c),
+          updatedAt: Date.now(),
+        };
+      }),
+    }));
+
+    return true;
   },
 
   // ==================== TAG ACTIONS ====================
@@ -369,21 +415,56 @@ export const useStore = create<Store>((set, get) => ({
 
   // ==================== DATA LOADING ====================
 
-  loadData: async () => {
-    await db.initDatabase();
-    const tags = await db.getAllTags();
-    const notes = await db.getAllNotes();
-
-    // Ensure inbox exists
+  loadData: async (databasePath?: string) => {
+    conversionUndoStack.length = 0;
+    noteBodyLoadPromises.clear();
+    await db.initDatabase(databasePath);
     await db.ensureInboxNotebook();
-    const notebooks = await db.getAllNotebooks();
+
+    const [tags, notes, notebooks] = await Promise.all([
+      db.getAllTags(),
+      db.getAllNoteSummaries(),
+      db.getAllNotebooks(),
+    ]);
+    const selectedNoteId = notes[0]?.id ?? null;
 
     set({
       notebooks,
       tags,
       notes,
-      selectedNoteId: notes[0]?.id ?? null,
+      selectedNotebookId: null,
+      selectedCollection: 'all',
+      selectedTagId: null,
+      selectedNoteId,
     });
+
+    if (selectedNoteId) {
+      void get().loadNoteBody(selectedNoteId);
+    }
+  },
+
+  loadNoteBody: async (id: string) => {
+    const existingNote = get().notes.find(note => note.id === id);
+    if (!existingNote || existingNote.bodyLoaded) return;
+
+    const inFlight = noteBodyLoadPromises.get(id);
+    if (inFlight) return inFlight;
+
+    const loadPromise = db.getNote(id)
+      .then(note => {
+        if (!note) return;
+        set(state => ({
+          notes: state.notes.map(existing =>
+            existing.id === id ? { ...existing, ...note, bodyLoaded: true } : existing
+          ),
+        }));
+      })
+      .finally(() => {
+        noteBodyLoadPromises.delete(id);
+      });
+
+    noteBodyLoadPromises.set(id, loadPromise);
+    return loadPromise;
   },
 }));
 

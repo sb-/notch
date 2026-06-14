@@ -1,15 +1,10 @@
 import { writeTextFile, mkdir } from '@tauri-apps/plugin-fs';
-import { marked } from 'marked';
 import hljs from 'highlight.js';
 import katex from 'katex';
 import type { Note, Cell } from '../types';
 import * as db from './database';
-
-// Configure marked
-marked.setOptions({
-  gfm: true,
-  breaks: true,
-});
+import { renderMarkdown } from './markdown';
+import { resolveResourceHtml, inlineResourceRefs } from './resources';
 
 /**
  * Export a note to Markdown format
@@ -31,12 +26,12 @@ export function exportNoteToMarkdown(note: Note): string {
   for (const cell of note.cells) {
     switch (cell.type) {
       case 'text':
-        lines.push(cell.data);
+        lines.push(inlineResourceRefs(cell.data));
         lines.push('');
         break;
 
       case 'markdown':
-        lines.push(cell.data);
+        lines.push(inlineResourceRefs(cell.data));
         lines.push('');
         break;
 
@@ -148,14 +143,10 @@ export function exportNoteToHTML(note: Note): string {
 function renderCellToHTML(cell: Cell): string {
   switch (cell.type) {
     case 'text':
-      return `<div class="text-cell"><p>${escapeHtml(cell.data).replace(/\n/g, '<br>')}</p></div>`;
+      return `<div class="text-cell">${resolveResourceHtml(cell.data)}</div>`;
 
     case 'markdown':
-      try {
-        return `<div class="markdown-cell">${marked.parse(cell.data)}</div>`;
-      } catch {
-        return `<div class="text-cell"><p>${escapeHtml(cell.data)}</p></div>`;
-      }
+      return `<div class="markdown-cell">${renderMarkdown(cell.data)}</div>`;
 
     case 'code':
       const highlighted = cell.language && hljs.getLanguage(cell.language)

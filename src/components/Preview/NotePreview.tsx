@@ -1,29 +1,11 @@
 import { useMemo, useEffect, useRef } from 'react';
-import { marked } from 'marked';
 import hljs from 'highlight.js';
 import katex from 'katex';
 import mermaid from 'mermaid';
-import DOMPurify from 'dompurify';
-import type { Config } from 'dompurify';
+import { renderMarkdown } from '../../services/markdown';
+import { sanitizeRichText } from '../../services/html';
+import { resolveResourceHtml, useResourceVersion } from '../../services/resources';
 import type { Note } from '../../types';
-
-// Configure DOMPurify for text cells
-const sanitizeConfig: Config = {
-  ALLOWED_TAGS: [
-    'p', 'br', 'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'del',
-    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-    'ul', 'ol', 'li',
-    'blockquote', 'pre', 'code',
-    'a', 'span', 'div',
-    'table', 'thead', 'tbody', 'tr', 'th', 'td',
-    'hr', 'sub', 'sup',
-  ],
-  ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'style'],
-  ALLOW_DATA_ATTR: false,
-  RETURN_TRUSTED_TYPE: false,
-  // Allow custom protocols for internal links
-  ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|notch|quiver-note-url):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
-};
 
 interface NotePreviewProps {
   note: Note;
@@ -37,37 +19,9 @@ function addLineNumbers(code: string, highlighted: string): string {
   return `<div class="code-with-lines"><div class="line-numbers">${lineNumbers}</div><code>${highlighted}</code></div>`;
 }
 
-// Configure marked with highlight.js
-marked.use({
-  gfm: true,
-  breaks: true,
-  // Disable auto-linking of raw URLs - only explicit [text](url) links should work
-  tokenizer: {
-    url() { return undefined; },
-  },
-  renderer: {
-    // Custom link renderer to preserve notch:// and quiver-note-url:// protocols
-    link(href: string, title: string | null | undefined, text: string) {
-      const titleAttr = title ? ` title="${title}"` : '';
-      return `<a href="${href}"${titleAttr}>${text}</a>`;
-    },
-    code(code: string, infostring?: string) {
-      const lang = infostring || '';
-      let highlighted = code;
-      if (lang && hljs.getLanguage(lang)) {
-        try {
-          highlighted = hljs.highlight(code, { language: lang }).value;
-        } catch {
-          // Fall through
-        }
-      }
-      return `<pre class="hljs language-${lang || 'plaintext'}">${addLineNumbers(code, highlighted)}</pre>`;
-    },
-  },
-});
-
 export default function NotePreview({ note }: NotePreviewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const resourceVersion = useResourceVersion();
 
   const content = useMemo(() => {
     return note.cells.map((cell, index) => {
@@ -80,7 +34,7 @@ export default function NotePreview({ note }: NotePreviewProps) {
               key={key}
               className="preview-cell preview-text cell-richtext"
               dangerouslySetInnerHTML={{
-                __html: DOMPurify.sanitize(cell.data, sanitizeConfig)
+                __html: sanitizeRichText(resolveResourceHtml(cell.data))
               }}
             />
           );
@@ -101,22 +55,13 @@ export default function NotePreview({ note }: NotePreviewProps) {
           );
 
         case 'markdown':
-          try {
-            const html = marked.parse(cell.data) as string;
-            return (
-              <div
-                key={key}
-                className="preview-cell markdown-preview"
-                dangerouslySetInnerHTML={{ __html: html }}
-              />
-            );
-          } catch {
-            return (
-              <div key={key} className="preview-cell preview-text">
-                <p>{cell.data}</p>
-              </div>
-            );
-          }
+          return (
+            <div
+              key={key}
+              className="preview-cell markdown-preview"
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(cell.data) }}
+            />
+          );
 
         case 'latex':
           try {
@@ -157,7 +102,7 @@ export default function NotePreview({ note }: NotePreviewProps) {
           );
       }
     });
-  }, [note.cells]);
+  }, [note.cells, resourceVersion]);
 
   // Render mermaid diagrams after mount
   useEffect(() => {
