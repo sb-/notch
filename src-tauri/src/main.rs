@@ -40,7 +40,17 @@ struct LibraryInfo {
 }
 
 fn main() {
-    let app = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // The updater + process plugins are desktop-only.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init());
+    }
+
+    let app = builder
         .manage(PendingLibraryPath::default())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
@@ -114,6 +124,9 @@ fn main() {
                 }
                 "split_view" => {
                     let _ = window.eval("window.__NOTCH__.setEditorViewMode('split')");
+                }
+                "check_for_updates" => {
+                    let _ = window.eval("window.__NOTCH__.checkForUpdates()");
                 }
                 _ => {}
             }
@@ -522,13 +535,23 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
         handle,
         "Help",
         true,
-        &[&MenuItem::with_id(
-            handle,
-            "documentation",
-            "Documentation",
-            true,
-            None::<&str>,
-        )?],
+        &[
+            &MenuItem::with_id(
+                handle,
+                "check_for_updates",
+                "Check for Updates...",
+                true,
+                None::<&str>,
+            )?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(
+                handle,
+                "documentation",
+                "Documentation",
+                true,
+                None::<&str>,
+            )?,
+        ],
     )?;
 
     Menu::with_items(
