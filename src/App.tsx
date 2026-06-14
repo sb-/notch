@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { open, save, message, ask } from '@tauri-apps/plugin-dialog';
 import { useStore, useLayoutMode, useSidebarVisible } from './store';
 import { importQuiverLibrary, scanForDuplicates, type ImportProgress } from './services/import';
@@ -10,7 +11,13 @@ import {
   createLibrary,
   getActiveLibraryId,
   getLibraries,
+  libraryFilename,
+  markLibraryLocationPrompted,
+  openLibrary,
+  refreshLibrary,
   setActiveLibraryId,
+  shouldPromptForLibraryLocation,
+  takePendingLibraryPath,
   type LibraryInfo,
 } from './services/libraries';
 import Sidebar from './components/Sidebar/Sidebar';
@@ -34,6 +41,10 @@ function getStoredWidth(key: string, fallback: number, min: number, max: number)
   }
 }
 
+function getErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 // Expose functions to Tauri for menu events
 declare global {
   interface Window {
@@ -41,6 +52,7 @@ declare global {
       newNote: () => void;
       newNotebook: () => void;
       newLibrary: () => void;
+      openLibrary: () => void;
       importLibrary: () => void;
       exportNote: () => void;
       exportLibrary: () => void;
@@ -66,6 +78,7 @@ export default function App() {
   const [isCreateLibraryOpen, setIsCreateLibraryOpen] = useState(false);
   const [newLibraryName, setNewLibraryName] = useState('');
   const newLibraryInputRef = useRef<HTMLInputElement>(null);
+  const firstLaunchPromptedRef = useRef(false);
   const loadData = useStore(state => state.loadData);
   const layoutMode = useLayoutMode();
   const sidebarVisible = useSidebarVisible();
@@ -83,6 +96,65 @@ export default function App() {
       newLibraryInputRef.current?.focus();
     });
   }, [isCreateLibraryOpen]);
+
+  const activateLibrary = useCallback(async (library: LibraryInfo) => {
+    const nextLibraries = getLibraries();
+    setLibraries(nextLibraries);
+    setActiveLibraryId(library.id);
+
+    if (library.id === activeLibraryId) {
+      await loadData(library.dbPath);
+      setLoading(false);
+      return;
+    }
+
+    setActiveLibrary(library.id);
+  }, [activeLibraryId, loadData]);
+
+  const createLibraryAtChosenLocation = useCallback(async (name: string): Promise<boolean> => {
+    const libraryPath = await save({
+      title: 'Create Notch Library',
+      defaultPath: libraryFilename(name),
+      filters: [
+        { name: 'Notch Library', extensions: ['notch'] },
+      ],
+    });
+
+    if (!libraryPath) return false;
+
+    const library = await createLibrary(name, libraryPath);
+    await activateLibrary(library);
+    return true;
+  }, [activateLibrary]);
+
+  const handleOpenLibraryPath = useCallback(async (path: string) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const library = await openLibrary(path);
+      await activateLibrary(library);
+    } catch (err) {
+      setLoading(false);
+      await message(`Could not open library: ${getErrorMessage(err)}`, {
+        title: 'Open Library',
+        kind: 'error',
+      });
+    }
+  }, [activateLibrary]);
+
+  const handleOpenLibrary = useCallback(async () => {
+    const selected = await open({
+      multiple: false,
+      directory: true,
+      recursive: false,
+      fileAccessMode: 'scoped',
+      title: 'Open Notch Library (.notch)',
+    });
+
+    if (!selected || Array.isArray(selected)) return;
+    await handleOpenLibraryPath(selected);
+  }, [handleOpenLibraryPath]);
 
   const startColumnResize = (
     column: 'sidebar' | 'noteList',
@@ -126,13 +198,45 @@ export default function App() {
   useEffect(() => {
     if (!activeLibrary) return;
 
-    loadData(activeLibrary.dbPath)
-      .then(() => setLoading(false))
-      .catch(err => {
-        console.error('Failed to initialize database:', err);
-        setError(err.message);
-        setLoading(false);
-      });
+    let cancelled = false;
+    setLoading(true);
+
+    const loadActiveLibrary = async () => {
+      try {
+        const libraryToLoad = activeLibrary.path
+          ? await refreshLibrary(activeLibrary)
+          : activeLibrary;
+
+        if (cancelled) return;
+
+        if (libraryToLoad.path) {
+          setLibraries(getLibraries());
+        }
+
+        await loadData(libraryToLoad.dbPath);
+
+        if (!cancelled) {
+          setError(null);
+          setLoading(false);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Failed to initialize database:', err);
+          setError(getErrorMessage(err));
+          setLoading(false);
+        }
+      }
+    };
+
+    void loadActiveLibrary();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeLibrary?.id, activeLibrary?.dbPath, activeLibrary?.path, loadData]);
+
+  useEffect(() => {
+    if (!activeLibrary) return;
 
     // Expose functions for Tauri menu events
     window.__NOTCH__ = {
@@ -151,6 +255,9 @@ export default function App() {
       },
       newLibrary: () => {
         handleCreateLibrary();
+      },
+      openLibrary: () => {
+        void handleOpenLibrary();
       },
       importLibrary: async () => {
         const selected = await open({
@@ -186,21 +293,23 @@ export default function App() {
               ? `${duplicateList}, and ${moreCount} more`
               : duplicateList;
 
-            const shouldContinue = await ask(
-              `Found ${duplicates.notebookNames.length} notebook(s) that already exist:\n\n${duplicateMsg}\n\nDo you want to skip these and import only new notebooks?`,
+            const duplicateAction = await message(
+              `Found ${duplicates.notebookNames.length} notebook(s) that already exist:\n\n${duplicateMsg}\n\nHow should Notch handle them?`,
               {
                 title: 'Duplicate Notebooks Found',
                 kind: 'warning',
-                okLabel: 'Skip Duplicates',
-                cancelLabel: 'Import All (Create Duplicates)',
+                buttons: {
+                  yes: 'Skip Duplicates',
+                  no: 'Import All',
+                  cancel: 'Cancel Import',
+                },
               }
             );
 
-            if (shouldContinue === null) {
-              // User closed the dialog without choosing
+            if (duplicateAction !== 'Skip Duplicates' && duplicateAction !== 'Import All') {
               return;
             }
-            skipDuplicates = shouldContinue;
+            skipDuplicates = duplicateAction === 'Skip Duplicates';
           }
 
           // Start import
@@ -327,15 +436,25 @@ export default function App() {
         useStore.getState().setEditorViewMode(mode);
       },
     };
-  }, [activeLibrary, loadData]);
+  }, [activeLibrary, handleCreateLibrary, handleOpenLibrary, loadData]);
 
   const handleSelectLibrary = async (libraryId: string) => {
     const library = libraries.find(item => item.id === libraryId);
     if (!library || library.id === activeLibraryId) return;
+
     setLoading(true);
     setError(null);
-    setActiveLibraryId(library.id);
-    setActiveLibrary(library.id);
+
+    try {
+      const libraryToActivate = library.path ? await refreshLibrary(library) : library;
+      await activateLibrary(libraryToActivate);
+    } catch (err) {
+      setLoading(false);
+      await message(`Could not open library: ${getErrorMessage(err)}`, {
+        title: 'Open Library',
+        kind: 'error',
+      });
+    }
   };
 
   const closeCreateLibraryDialog = () => {
@@ -343,7 +462,7 @@ export default function App() {
     setNewLibraryName('');
   };
 
-  const handleCreateLibrarySubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleCreateLibrarySubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
     const name = newLibraryName.trim();
@@ -357,17 +476,80 @@ export default function App() {
     setIsCreateLibraryOpen(false);
 
     try {
-      const library = createLibrary(name);
-      const nextLibraries = getLibraries();
-      setLibraries(nextLibraries);
-      setActiveLibraryId(library.id);
-      setActiveLibrary(library.id);
-      setNewLibraryName('');
+      const created = await createLibraryAtChosenLocation(name);
+      if (created) {
+        setNewLibraryName('');
+      } else {
+        setLoading(false);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
+      setIsCreateLibraryOpen(true);
+      await message(`Could not create library: ${getErrorMessage(err)}`, {
+        title: 'New Library',
+        kind: 'error',
+      });
     }
   };
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    listen<string>('notch-library-opened', event => {
+      void handleOpenLibraryPath(event.payload);
+      void takePendingLibraryPath().catch(() => null);
+    }).then(listener => {
+      if (disposed) {
+        listener();
+      } else {
+        unlisten = listener;
+      }
+    }).catch(err => {
+      console.warn('Could not listen for library open events:', err);
+    });
+
+    takePendingLibraryPath()
+      .then(path => {
+        if (!disposed && path) {
+          void handleOpenLibraryPath(path);
+        }
+      })
+      .catch(err => {
+        console.warn('Could not read pending library path:', err);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [handleOpenLibraryPath]);
+
+  useEffect(() => {
+    if (loading || error || firstLaunchPromptedRef.current || !shouldPromptForLibraryLocation()) {
+      return;
+    }
+
+    const hasExistingNotes = useStore.getState().notes.length > 0;
+    markLibraryLocationPrompted();
+    firstLaunchPromptedRef.current = true;
+
+    if (hasExistingNotes) return;
+
+    ask('Choose where to store your Notch library?', {
+      title: 'Library Location',
+      kind: 'info',
+      okLabel: 'Choose Location',
+      cancelLabel: 'Use Default',
+    }).then(chooseLocation => {
+      if (chooseLocation) {
+        setNewLibraryName('Default Library');
+        setIsCreateLibraryOpen(true);
+      }
+    }).catch(err => {
+      console.warn('Could not show library location prompt:', err);
+    });
+  }, [loading, error]);
 
   useEffect(() => {
     // Intercept all clicks on note links at document level with capture
@@ -597,6 +779,7 @@ export default function App() {
             activeLibraryId={activeLibraryId}
             onSelectLibrary={handleSelectLibrary}
             onCreateLibrary={handleCreateLibrary}
+            onOpenLibrary={handleOpenLibrary}
           />
           <div
             className="column-resizer"

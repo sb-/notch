@@ -39,6 +39,21 @@
       "icons/128x128.png",
       "icons/128x128@2x.png"
     ],
+    "fileAssociations": [
+      {
+        "ext": ["notch"],
+        "contentTypes": ["com.notch.library"],
+        "name": "Notch Library",
+        "description": "Notch Library",
+        "role": "Editor",
+        "rank": "Owner",
+        "mimeType": "application/x-notch-library",
+        "exportedType": {
+          "identifier": "com.notch.library",
+          "conformsTo": ["com.apple.package"]
+        }
+      }
+    ],
     "macOS": {
       "minimumSystemVersion": "10.15",
       "dmg": {

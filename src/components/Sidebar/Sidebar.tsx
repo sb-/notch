@@ -231,6 +231,7 @@ interface SidebarProps {
   activeLibraryId?: string;
   onSelectLibrary?: (libraryId: string) => void;
   onCreateLibrary?: () => void;
+  onOpenLibrary?: () => void;
 }
 
 export default function Sidebar({
@@ -238,6 +239,7 @@ export default function Sidebar({
   activeLibraryId,
   onSelectLibrary,
   onCreateLibrary,
+  onOpenLibrary,
 }: SidebarProps = {}) {
   const [activeTab, setActiveTab] = useState<'notebooks' | 'tags'>('notebooks');
   const [newItemName, setNewItemName] = useState('');
@@ -473,6 +475,15 @@ export default function Sidebar({
                 }}
               >
                 New Library...
+              </button>
+              <button
+                className="library-menu-item"
+                onClick={() => {
+                  onOpenLibrary?.();
+                  setShowLibraryMenu(false);
+                }}
+              >
+                Open Library...
               </button>
             </div>
           )}

@@ -186,7 +186,7 @@ export const useStore = create<Store>((set, get) => ({
     await db.updateNote(id, updates);
     set(state => ({
       notes: state.notes.map(n =>
-        n.id === id ? { ...n, ...updates, updatedAt: Date.now() } : n
+        n.id === id ? { ...n, ...updates, updatedAt: updates.updatedAt ?? Date.now() } : n
       ),
     }));
   },

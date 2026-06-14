@@ -1,11 +1,11 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
+import { toMonacoLanguage } from '../codeLanguages';
 
 interface CodeCellProps {
   data: string;
   language: string;
   onChange: (data: string) => void;
-  onLanguageChange: (language: string) => void;
   onFocus: () => void;
   isFocused?: boolean;
   onBackspaceEmpty?: () => void;
@@ -13,95 +13,65 @@ interface CodeCellProps {
   onNavigateNext?: () => void;
 }
 
-// Languages offered in the picker (value = Monaco language id, with a friendly label).
-const LANGUAGE_OPTIONS: { id: string; label: string }[] = [
-  { id: 'plaintext', label: 'Plain Text' },
-  { id: 'javascript', label: 'JavaScript' },
-  { id: 'typescript', label: 'TypeScript' },
-  { id: 'python', label: 'Python' },
-  { id: 'rust', label: 'Rust' },
-  { id: 'go', label: 'Go' },
-  { id: 'java', label: 'Java' },
-  { id: 'c', label: 'C' },
-  { id: 'cpp', label: 'C++' },
-  { id: 'csharp', label: 'C#' },
-  { id: 'objective-c', label: 'Objective-C' },
-  { id: 'swift', label: 'Swift' },
-  { id: 'kotlin', label: 'Kotlin' },
-  { id: 'scala', label: 'Scala' },
-  { id: 'dart', label: 'Dart' },
-  { id: 'ruby', label: 'Ruby' },
-  { id: 'php', label: 'PHP' },
-  { id: 'perl', label: 'Perl' },
-  { id: 'lua', label: 'Lua' },
-  { id: 'r', label: 'R' },
-  { id: 'elixir', label: 'Elixir' },
-  { id: 'clojure', label: 'Clojure' },
-  { id: 'sql', label: 'SQL' },
-  { id: 'graphql', label: 'GraphQL' },
-  { id: 'html', label: 'HTML' },
-  { id: 'css', label: 'CSS' },
-  { id: 'scss', label: 'SCSS' },
-  { id: 'less', label: 'Less' },
-  { id: 'json', label: 'JSON' },
-  { id: 'yaml', label: 'YAML' },
-  { id: 'xml', label: 'XML' },
-  { id: 'markdown', label: 'Markdown' },
-  { id: 'shell', label: 'Shell' },
-  { id: 'powershell', label: 'PowerShell' },
-  { id: 'dockerfile', label: 'Dockerfile' },
-  { id: 'ini', label: 'INI / TOML' },
-];
-
-// Resolve stored language names (including legacy/Quiver/ACE aliases) to Monaco ids.
-const languageAliases: Record<string, string> = {
-  c_cpp: 'cpp',
-  'c++': 'cpp',
-  golang: 'go',
-  objectivec: 'objective-c',
-  objc: 'objective-c',
-  text: 'plaintext',
-  plain: 'plaintext',
-  sh: 'shell',
-  bash: 'shell',
-  zsh: 'shell',
-  jsx: 'javascript',
-  tsx: 'typescript',
-  yml: 'yaml',
-  toml: 'ini',
-  'c#': 'csharp',
-  htmlmixed: 'html',
-};
-
-function toMonacoLanguage(language: string): string {
-  const lower = (language || '').toLowerCase();
-  return languageAliases[lower] || lower || 'plaintext';
-}
+const EDITOR_FONT_SIZE = 13;
+const EDITOR_LINE_HEIGHT = 21;
+const HORIZONTAL_SCROLLBAR_RESERVE = 8;
+const MIN_EDITOR_HEIGHT = EDITOR_LINE_HEIGHT;
 
 export default function CodeCell({
   data,
   language,
   onChange,
-  onLanguageChange,
   onFocus,
   onBackspaceEmpty,
   onNavigatePrev,
   onNavigateNext,
 }: CodeCellProps) {
+  const [editorHeight, setEditorHeight] = useState(MIN_EDITOR_HEIGHT);
+  const editorRef = useRef<{
+    getContentHeight: () => number;
+    layout: (dimension?: { width: number; height: number }) => void;
+  } | null>(null);
+  const dataRef = useRef(data);
+
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
+
+  useEffect(() => {
+    editorRef.current?.layout();
+  }, [editorHeight]);
+
+  const syncEditorHeight = useCallback((editor = editorRef.current) => {
+    if (!editor) return;
+
+    const height = Math.max(
+      MIN_EDITOR_HEIGHT,
+      Math.ceil(editor.getContentHeight()) + HORIZONTAL_SCROLLBAR_RESERVE
+    );
+    setEditorHeight(current => current === height ? current : height);
+  }, []);
+
   const handleEditorMount = useCallback((editor: unknown) => {
     onFocus();
     // Type the editor for Monaco
     const monacoEditor = editor as {
       onKeyDown: (handler: (e: { browserEvent: KeyboardEvent }) => void) => void;
+      onDidContentSizeChange: (handler: () => void) => { dispose: () => void };
+      getContentHeight: () => number;
       getPosition: () => { lineNumber: number; column: number } | null;
+      layout: (dimension?: { width: number; height: number }) => void;
       getModel: () => { getLineCount: () => number; getLineMaxColumn: (line: number) => number } | null;
     };
+    editorRef.current = monacoEditor;
+    syncEditorHeight(monacoEditor);
+    monacoEditor.onDidContentSizeChange(() => syncEditorHeight(monacoEditor));
 
     monacoEditor.onKeyDown((e) => {
       const key = e.browserEvent.key;
 
       // Backspace on empty
-      if (key === 'Backspace' && !data.trim() && onBackspaceEmpty) {
+      if (key === 'Backspace' && !dataRef.current.trim() && onBackspaceEmpty) {
         e.browserEvent.preventDefault();
         onBackspaceEmpty();
         return;
@@ -127,7 +97,7 @@ export default function CodeCell({
         }
       }
     });
-  }, [onFocus, data, onBackspaceEmpty, onNavigatePrev, onNavigateNext]);
+  }, [onFocus, onBackspaceEmpty, onNavigatePrev, onNavigateNext, syncEditorHeight]);
 
   const handleEditorChange = useCallback(
     (value: string | undefined) => {
@@ -138,32 +108,9 @@ export default function CodeCell({
 
   const monacoLanguage = toMonacoLanguage(language);
 
-  // Show the stored language in the dropdown even if it isn't a preset option.
-  const knownOption = LANGUAGE_OPTIONS.some(option => option.id === monacoLanguage);
-
-  // Calculate height based on content (min 100px, max 500px)
-  const lineCount = (data.match(/\n/g) || []).length + 1;
-  const height = Math.min(Math.max(lineCount * 20 + 20, 100), 500);
-
   return (
     <div className="code-cell-wrapper">
-      <div className="code-cell-toolbar">
-        <select
-          className="code-lang-select"
-          value={monacoLanguage}
-          onChange={(e) => onLanguageChange(e.target.value)}
-          onClick={(e) => e.stopPropagation()}
-          title="Language"
-        >
-          {!knownOption && <option value={monacoLanguage}>{language || 'Plain Text'}</option>}
-          {LANGUAGE_OPTIONS.map((option) => (
-            <option key={option.id} value={option.id}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="monaco-container" style={{ height: `${height}px` }}>
+      <div className="monaco-container" style={{ height: `${editorHeight}px` }}>
         <Editor
           height="100%"
           language={monacoLanguage}
@@ -173,25 +120,26 @@ export default function CodeCell({
           theme="vs-dark"
           options={{
             minimap: { enabled: false },
-            lineNumbers: 'off',
+            lineNumbers: 'on',
             glyphMargin: false,
             folding: false,
             lineDecorationsWidth: 0,
-            lineNumbersMinChars: 0,
+            lineNumbersMinChars: 3,
             scrollBeyondLastLine: false,
-            fontSize: 13,
+            fontSize: EDITOR_FONT_SIZE,
+            lineHeight: EDITOR_LINE_HEIGHT,
             fontFamily: "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
             tabSize: 2,
             automaticLayout: true,
-            wordWrap: 'on',
+            wordWrap: 'off',
             renderLineHighlight: 'none',
             scrollbar: {
-              vertical: 'auto',
+              vertical: 'hidden',
               horizontal: 'auto',
-              verticalScrollbarSize: 8,
               horizontalScrollbarSize: 8,
+              handleMouseWheel: false,
             },
-            padding: { top: 12, bottom: 12 },
+            padding: { top: 0, bottom: 0 },
             overviewRulerBorder: false,
             overviewRulerLanes: 0,
             hideCursorInOverviewRuler: true,

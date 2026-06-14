@@ -35,10 +35,6 @@ export default function CellContainer({
     updateCell(noteId, cell.id, { data });
   };
 
-  const handleLanguageChange = (language: string) => {
-    updateCell(noteId, cell.id, { language });
-  };
-
   const handleDiagramTypeChange = (diagramType: 'sequence' | 'flow') => {
     updateCell(noteId, cell.id, { diagramType });
   };
@@ -68,7 +64,6 @@ export default function CellContainer({
           <CodeCell
             {...commonProps}
             language={cell.language || 'javascript'}
-            onLanguageChange={handleLanguageChange}
           />
         );
       case 'markdown':

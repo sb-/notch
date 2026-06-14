@@ -1,18 +1,57 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
-    Manager,
+    Emitter, Manager, State,
 };
 
+const LIBRARY_EXTENSION: &str = "notch";
+const LIBRARY_MANIFEST: &str = "manifest.json";
+const LIBRARY_DATABASE: &str = "notch.db";
+
+#[derive(Default)]
+struct PendingLibraryPath(Mutex<Option<String>>);
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryManifest {
+    id: String,
+    name: String,
+    created_at: i64,
+    version: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryInfo {
+    id: String,
+    name: String,
+    path: String,
+    db_path: String,
+    created_at: i64,
+}
+
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        .manage(PendingLibraryPath::default())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_sql::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .invoke_handler(tauri::generate_handler![
+            create_library_package,
+            open_library_package,
+            take_pending_library_path
+        ])
         .setup(|app| {
             // Create the menu
             let menu = create_menu(app.handle())?;
@@ -36,6 +75,9 @@ fn main() {
                 }
                 "new_library" => {
                     let _ = window.eval("window.__NOTCH__.newLibrary()");
+                }
+                "open_library" => {
+                    let _ = window.eval("window.__NOTCH__.openLibrary()");
                 }
                 "import" => {
                     let _ = window.eval("window.__NOTCH__.importLibrary()");
@@ -76,8 +118,229 @@ fn main() {
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        if let tauri::RunEvent::Opened { urls } = event {
+            handle_opened_urls(app_handle, urls);
+        }
+    });
+}
+
+#[tauri::command]
+fn create_library_package(path: String, name: String) -> Result<LibraryInfo, String> {
+    let name = normalize_library_name(&name);
+    let dir = ensure_library_extension(PathBuf::from(path));
+
+    if dir.exists() {
+        if !dir.is_dir() {
+            return Err("A file already exists at that location.".to_string());
+        }
+
+        if dir.join(LIBRARY_MANIFEST).exists() || dir.join(LIBRARY_DATABASE).exists() {
+            return Err("A Notch library already exists at that location.".to_string());
+        }
+
+        let mut entries = fs::read_dir(&dir)
+            .map_err(|err| format!("Could not inspect library directory: {err}"))?;
+        if entries.next().is_some() {
+            return Err("Choose an empty location for the new library.".to_string());
+        }
+    }
+
+    fs::create_dir_all(&dir).map_err(|err| format!("Could not create library: {err}"))?;
+
+    let created_at = current_timestamp_ms();
+    let manifest = LibraryManifest {
+        id: generate_library_id(created_at),
+        name,
+        created_at,
+        version: 1,
+    };
+
+    write_manifest(&dir, &manifest)?;
+
+    let db_path = dir.join(LIBRARY_DATABASE);
+    if !db_path.exists() {
+        fs::File::create(&db_path)
+            .map_err(|err| format!("Could not create library database: {err}"))?;
+    }
+
+    library_info(dir, manifest)
+}
+
+#[tauri::command]
+fn open_library_package(path: String) -> Result<LibraryInfo, String> {
+    let dir = library_dir_from_path(Path::new(&path))?;
+    let manifest_path = dir.join(LIBRARY_MANIFEST);
+    let db_path = dir.join(LIBRARY_DATABASE);
+
+    let manifest = if manifest_path.exists() {
+        read_manifest(&dir)?
+    } else if db_path.exists() {
+        let created_at = fs::metadata(&db_path)
+            .ok()
+            .and_then(|metadata| metadata.created().ok())
+            .and_then(system_time_to_ms)
+            .unwrap_or_else(current_timestamp_ms);
+        let manifest = LibraryManifest {
+            id: generate_library_id(created_at),
+            name: library_name_from_path(&dir),
+            created_at,
+            version: 1,
+        };
+        write_manifest(&dir, &manifest)?;
+        manifest
+    } else {
+        return Err("That folder is not a Notch library.".to_string());
+    };
+
+    if !db_path.exists() {
+        fs::File::create(&db_path)
+            .map_err(|err| format!("Could not create library database: {err}"))?;
+    }
+
+    library_info(dir, manifest)
+}
+
+#[tauri::command]
+fn take_pending_library_path(state: State<'_, PendingLibraryPath>) -> Option<String> {
+    state.0.lock().ok().and_then(|mut pending| pending.take())
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn handle_opened_urls(app: &tauri::AppHandle, urls: Vec<tauri::Url>) {
+    for url in urls {
+        let Ok(path) = url.to_file_path() else {
+            continue;
+        };
+        if !looks_like_library_path(&path) {
+            continue;
+        }
+
+        let path = library_dir_from_path(&path).unwrap_or(path);
+        let path = path_to_string(&path);
+
+        if let Some(state) = app.try_state::<PendingLibraryPath>() {
+            if let Ok(mut pending) = state.0.lock() {
+                *pending = Some(path.clone());
+            }
+        }
+
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.emit("notch-library-opened", path);
+            let _ = window.set_focus();
+        }
+    }
+}
+
+fn normalize_library_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        "Untitled Library".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn ensure_library_extension(mut path: PathBuf) -> PathBuf {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case(LIBRARY_EXTENSION))
+        .unwrap_or(false)
+    {
+        path
+    } else {
+        path.set_extension(LIBRARY_EXTENSION);
+        path
+    }
+}
+
+fn library_dir_from_path(path: &Path) -> Result<PathBuf, String> {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case(LIBRARY_EXTENSION))
+        .unwrap_or(false)
+    {
+        return Ok(path.to_path_buf());
+    }
+
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == LIBRARY_MANIFEST || name == LIBRARY_DATABASE)
+        .unwrap_or(false)
+    {
+        if let Some(parent) = path.parent() {
+            return library_dir_from_path(parent);
+        }
+    }
+
+    Err("Select a .notch library package.".to_string())
+}
+
+fn looks_like_library_path(path: &Path) -> bool {
+    library_dir_from_path(path).is_ok()
+}
+
+fn read_manifest(dir: &Path) -> Result<LibraryManifest, String> {
+    let manifest_path = dir.join(LIBRARY_MANIFEST);
+    let manifest = fs::read_to_string(&manifest_path)
+        .map_err(|err| format!("Could not read library manifest: {err}"))?;
+    serde_json::from_str(&manifest)
+        .map_err(|err| format!("Library manifest is not valid JSON: {err}"))
+}
+
+fn write_manifest(dir: &Path, manifest: &LibraryManifest) -> Result<(), String> {
+    let manifest_path = dir.join(LIBRARY_MANIFEST);
+    let json = serde_json::to_string_pretty(manifest)
+        .map_err(|err| format!("Could not serialize library manifest: {err}"))?;
+    fs::write(manifest_path, json).map_err(|err| format!("Could not write library manifest: {err}"))
+}
+
+fn library_info(dir: PathBuf, manifest: LibraryManifest) -> Result<LibraryInfo, String> {
+    let dir = fs::canonicalize(&dir).unwrap_or(dir);
+    let db_path = dir.join(LIBRARY_DATABASE);
+    Ok(LibraryInfo {
+        id: manifest.id,
+        name: manifest.name,
+        path: path_to_string(&dir),
+        db_path: format!("sqlite:{}", path_to_string(&db_path)),
+        created_at: manifest.created_at,
+    })
+}
+
+fn library_name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .map(normalize_library_name)
+        .unwrap_or_else(|| "Untitled Library".to_string())
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn current_timestamp_ms() -> i64 {
+    system_time_to_ms(SystemTime::now()).unwrap_or(0)
+}
+
+fn system_time_to_ms(time: SystemTime) -> Option<i64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+}
+
+fn generate_library_id(_created_at: i64) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("library-{nanos}-{}", std::process::id())
 }
 
 fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error> {
@@ -114,6 +377,13 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
                 Some("CmdOrCtrl+Shift+N"),
             )?,
             &MenuItem::with_id(handle, "new_library", "New Library...", true, None::<&str>)?,
+            &MenuItem::with_id(
+                handle,
+                "open_library",
+                "Open Library...",
+                true,
+                Some("CmdOrCtrl+O"),
+            )?,
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(
                 handle,

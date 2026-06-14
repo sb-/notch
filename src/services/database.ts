@@ -463,13 +463,17 @@ export async function createNote(notebookId: string, title = 'Untitled', sourceU
 }
 
 export async function updateNote(id: string, updates: Partial<Note>): Promise<void> {
-  const now = Date.now();
+  const updatedAt = updates.updatedAt ?? Date.now();
   const fields: string[] = ['updated_at = ?'];
-  const values: (string | number | null)[] = [now];
+  const values: (string | number | null)[] = [updatedAt];
 
   if (updates.title !== undefined) {
     fields.push('title = ?');
     values.push(updates.title);
+  }
+  if (updates.createdAt !== undefined) {
+    fields.push('created_at = ?');
+    values.push(updates.createdAt);
   }
   if (updates.notebookId !== undefined) {
     fields.push('notebook_id = ?');

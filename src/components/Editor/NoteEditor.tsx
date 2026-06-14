@@ -11,6 +11,7 @@ import {
   bytesToBase64,
   RESOURCE_PROTOCOL,
 } from '../../services/resources';
+import { LANGUAGE_OPTIONS, toMonacoLanguage } from './codeLanguages';
 import type { CellType, EditorViewMode, Note } from '../../types';
 
 const NotePreview = lazy(() => import('../Preview/NotePreview'));
@@ -82,6 +83,8 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   const focusedCell = note?.cells.find(c => c.id === focusedCellId) ?? note?.cells[0] ?? null;
   const effectiveFocusedCellId = focusedCell?.id ?? null;
   const currentCellType = focusedCell?.type || 'text';
+  const currentCodeLanguage = toMonacoLanguage(focusedCell?.language || 'javascript');
+  const hasKnownCodeLanguage = LANGUAGE_OPTIONS.some(option => option.id === currentCodeLanguage);
 
   const handleTitleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -137,6 +140,12 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
       await convertCell(note.id, effectiveFocusedCellId, type);
     }
     setShowCellTypeMenu(false);
+  };
+
+  const handleCodeLanguageChange = async (language: string) => {
+    if (note && !showingPreviousNote && effectiveFocusedCellId && currentCellType === 'code') {
+      await updateCell(note.id, effectiveFocusedCellId, { language });
+    }
   };
 
   const closeAllMenus = () => {
@@ -420,21 +429,42 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
               )}
             </div>
 
-            {/* Formatting buttons */}
-            <div className="editor-format-buttons">
-              <button className="format-btn" title="Bold (⌘B)"><strong>B</strong></button>
-              <button className="format-btn" title="Italic (⌘I)"><em>I</em></button>
-              <button className="format-btn" title="Underline (⌘U)"><span style={{textDecoration:'underline'}}>U</span></button>
-              <button className="format-btn" title="Strikethrough"><span style={{textDecoration:'line-through'}}>S</span></button>
-              <button className="format-btn" title="Code">{'{}'}</button>
-              <button className="format-btn" title="Bullet List">•≡</button>
-              <button className="format-btn" title="Numbered List">1≡</button>
-              <button className="format-btn" title="Checkbox">☐</button>
-              <button className="format-btn" title="Horizontal Rule">—</button>
-              <button className="format-btn" title="Heading 1">H1</button>
-              <button className="format-btn" title="Heading 2">H2</button>
-              <button className="format-btn" title="Heading 3">H3</button>
-            </div>
+            {currentCellType === 'code' ? (
+              <div className="editor-code-language">
+                <select
+                  className="code-lang-select"
+                  value={currentCodeLanguage}
+                  onChange={e => handleCodeLanguageChange(e.target.value)}
+                  onClick={e => e.stopPropagation()}
+                  title="Code language"
+                  aria-label="Code language"
+                >
+                  {!hasKnownCodeLanguage && (
+                    <option value={currentCodeLanguage}>{focusedCell?.language || 'Plain Text'}</option>
+                  )}
+                  {LANGUAGE_OPTIONS.map(option => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div className="editor-format-buttons">
+                <button className="format-btn" title="Bold (⌘B)"><strong>B</strong></button>
+                <button className="format-btn" title="Italic (⌘I)"><em>I</em></button>
+                <button className="format-btn" title="Underline (⌘U)"><span style={{textDecoration:'underline'}}>U</span></button>
+                <button className="format-btn" title="Strikethrough"><span style={{textDecoration:'line-through'}}>S</span></button>
+                <button className="format-btn" title="Code">{'{}'}</button>
+                <button className="format-btn" title="Bullet List">•≡</button>
+                <button className="format-btn" title="Numbered List">1≡</button>
+                <button className="format-btn" title="Checkbox">☐</button>
+                <button className="format-btn" title="Horizontal Rule">—</button>
+                <button className="format-btn" title="Heading 1">H1</button>
+                <button className="format-btn" title="Heading 2">H2</button>
+                <button className="format-btn" title="Heading 3">H3</button>
+              </div>
+            )}
           </div>
 
           <div className="editor-toolbar-right">

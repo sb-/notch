@@ -867,6 +867,11 @@ body {
   gap: 2px;
 }
 
+.editor-code-language {
+  display: flex;
+  align-items: center;
+}
+
 .format-btn {
   width: 28px;
   height: 26px;
@@ -1185,16 +1190,19 @@ body {
 
 /* Code Cell */
 .cell-code {
-  background: var(--bg-secondary);
+  width: 100%;
+  background: #1e1e1e;
   border-radius: 6px;
   overflow: hidden;
   border: 1px solid var(--border-color);
   margin: 4px 0;
+  padding: 12px 16px;
 }
 
 .monaco-container {
+  width: 100%;
   min-height: 60px;
-  padding: 0 16px;
+  background: #1e1e1e;
 }
 
 /* Monaco overrides for cleaner look */
@@ -1202,12 +1210,22 @@ body {
   border-radius: 6px;
 }
 
+.monaco-container .monaco-editor,
+.monaco-container .monaco-editor-background,
+.monaco-container .monaco-editor .overflow-guard {
+  background: #1e1e1e !important;
+}
+
 .monaco-container .monaco-editor .margin {
-  background: var(--bg-secondary) !important;
+  background: #2a2a2a !important;
 }
 
 .monaco-container .monaco-editor .line-numbers {
-  color: var(--text-tertiary) !important;
+  color: #c7c7c7 !important;
+}
+
+.monaco-container .monaco-editor .current-line-number {
+  color: #ffffff !important;
 }
 
 /* Markdown Preview */
@@ -1854,35 +1872,31 @@ body {
   outline-offset: -1px;
 }
 
-/* Code cell language picker */
 .code-cell-wrapper {
   display: flex;
   flex-direction: column;
-}
-
-.code-cell-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  padding: 4px 16px 0;
+  width: 100%;
 }
 
 .code-lang-select {
   appearance: none;
   -webkit-appearance: none;
-  background: var(--bg-tertiary);
-  color: var(--text-secondary);
+  min-width: 168px;
+  height: 30px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
   border: 1px solid var(--border-color);
   border-radius: 4px;
-  font-size: 11px;
-  padding: 2px 22px 2px 8px;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0 28px 0 10px;
   cursor: pointer;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2'><polyline points='6 9 12 15 18 9'/></svg>");
   background-repeat: no-repeat;
-  background-position: right 6px center;
+  background-position: right 10px center;
 }
 
 .code-lang-select:hover {
-  color: var(--text-primary);
   border-color: var(--text-tertiary);
 }
 

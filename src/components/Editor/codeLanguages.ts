@@ -1,0 +1,63 @@
+// Languages offered in code-cell pickers (value = Monaco language id).
+export const LANGUAGE_OPTIONS: { id: string; label: string }[] = [
+  { id: 'plaintext', label: 'Plain Text' },
+  { id: 'javascript', label: 'JavaScript' },
+  { id: 'typescript', label: 'TypeScript' },
+  { id: 'python', label: 'Python' },
+  { id: 'rust', label: 'Rust' },
+  { id: 'go', label: 'Go' },
+  { id: 'java', label: 'Java' },
+  { id: 'c', label: 'C' },
+  { id: 'cpp', label: 'C++' },
+  { id: 'csharp', label: 'C#' },
+  { id: 'objective-c', label: 'Objective-C' },
+  { id: 'swift', label: 'Swift' },
+  { id: 'kotlin', label: 'Kotlin' },
+  { id: 'scala', label: 'Scala' },
+  { id: 'dart', label: 'Dart' },
+  { id: 'ruby', label: 'Ruby' },
+  { id: 'php', label: 'PHP' },
+  { id: 'perl', label: 'Perl' },
+  { id: 'lua', label: 'Lua' },
+  { id: 'r', label: 'R' },
+  { id: 'elixir', label: 'Elixir' },
+  { id: 'clojure', label: 'Clojure' },
+  { id: 'sql', label: 'SQL' },
+  { id: 'graphql', label: 'GraphQL' },
+  { id: 'html', label: 'HTML' },
+  { id: 'css', label: 'CSS' },
+  { id: 'scss', label: 'SCSS' },
+  { id: 'less', label: 'Less' },
+  { id: 'json', label: 'JSON' },
+  { id: 'yaml', label: 'YAML' },
+  { id: 'xml', label: 'XML' },
+  { id: 'markdown', label: 'Markdown' },
+  { id: 'shell', label: 'Shell' },
+  { id: 'powershell', label: 'PowerShell' },
+  { id: 'dockerfile', label: 'Dockerfile' },
+  { id: 'ini', label: 'INI / TOML' },
+];
+
+const languageAliases: Record<string, string> = {
+  c_cpp: 'cpp',
+  'c++': 'cpp',
+  golang: 'go',
+  objectivec: 'objective-c',
+  objc: 'objective-c',
+  text: 'plaintext',
+  plain: 'plaintext',
+  sh: 'shell',
+  bash: 'shell',
+  zsh: 'shell',
+  jsx: 'javascript',
+  tsx: 'typescript',
+  yml: 'yaml',
+  toml: 'ini',
+  'c#': 'csharp',
+  htmlmixed: 'html',
+};
+
+export function toMonacoLanguage(language: string | undefined): string {
+  const lower = (language || '').toLowerCase();
+  return languageAliases[lower] || lower || 'plaintext';
+}
