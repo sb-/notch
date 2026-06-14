@@ -45,6 +45,8 @@
     "sql:allow-select",
     "sql:allow-close",
     "clipboard-manager:allow-write-text",
-    "clipboard-manager:allow-read-text"
+    "clipboard-manager:allow-read-text",
+    "updater:default",
+    "process:default"
   ]
 }

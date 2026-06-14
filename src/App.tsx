@@ -7,6 +7,7 @@ import { importQuiverLibrary, scanForDuplicates, type ImportProgress } from './s
 import { exportNoteToMarkdown, exportNoteToHTML, exportNoteToJSON, exportLibraryToJSON, saveToFile } from './services/export';
 import { getNoteBySourceUuid, getNote } from './services/database';
 import { loadResourcesForNote } from './services/resources';
+import { checkForUpdates } from './services/updater';
 import {
   createLibrary,
   getActiveLibraryId,
@@ -61,6 +62,7 @@ declare global {
       toggleSidebar: () => void;
       setLayoutMode: (mode: LayoutMode) => void;
       setEditorViewMode: (mode: EditorViewMode) => void;
+      checkForUpdates: () => void;
     };
   }
 }
@@ -435,8 +437,19 @@ export default function App() {
       setEditorViewMode: (mode: EditorViewMode) => {
         useStore.getState().setEditorViewMode(mode);
       },
+      checkForUpdates: () => {
+        void checkForUpdates(false);
+      },
     };
   }, [activeLibrary, handleCreateLibrary, handleOpenLibrary, loadData]);
+
+  // Quietly check for updates shortly after launch.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void checkForUpdates(true);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, []);
 
   const handleSelectLibrary = async (libraryId: string) => {
     const library = libraries.find(item => item.id === libraryId);
