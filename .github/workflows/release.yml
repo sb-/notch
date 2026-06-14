@@ -22,6 +22,12 @@ permissions:
 jobs:
   release:
     runs-on: macos-latest
+    env:
+      # True only when an Apple cert secret is actually configured. Tauri's
+      # bundler treats an *empty-but-present* APPLE_CERTIFICATE as "sign me"
+      # and then fails the keychain import, so we must not set the APPLE_* env
+      # vars at all unless they're real.
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,23 +51,38 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      # --- Apple Developer ID signing + notarization (optional) ---
+      # Runs ONLY when the APPLE_CERTIFICATE secret is set. When it's absent,
+      # the APPLE_* env vars stay unset and tauri-action builds an UNSIGNED app
+      # (users right-click -> Open on first launch). Add the secrets later to
+      # get a notarized, double-clickable .dmg with no workflow changes.
+      - name: Configure Apple signing
+        if: env.HAS_APPLE_CERT == 'true'
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          A_ID: ${{ secrets.APPLE_ID }}
+          A_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          {
+            echo "APPLE_CERTIFICATE<<__EOF__"; echo "$CERT"; echo "__EOF__"
+            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
+            echo "APPLE_ID=$A_ID"
+            echo "APPLE_PASSWORD=$A_PASSWORD"
+            echo "APPLE_TEAM_ID=$TEAM_ID"
+          } >> "$GITHUB_ENV"
+
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # --- Updater signing (required for auto-update) ---
+          # Updater signing (required for auto-update). Apple signing vars, if
+          # configured, were exported to $GITHUB_ENV by the previous step.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # --- Apple Developer ID signing + notarization (optional) ---
-          # If these secrets are absent, tauri-action builds an UNSIGNED app
-          # (users right-click -> Open on first launch). Add them later to get
-          # a notarized, double-clickable .dmg with no workflow changes.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: 'Notch __VERSION__'
