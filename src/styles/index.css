@@ -1217,11 +1217,25 @@ body {
 }
 
 .monaco-container .monaco-editor .margin {
-  background: #2a2a2a !important;
+  background: linear-gradient(
+    to right,
+    #2a2a2a 0,
+    #2a2a2a calc(100% - 12px),
+    #1e1e1e calc(100% - 12px),
+    #1e1e1e 100%
+  ) !important;
+}
+
+.monaco-container .monaco-editor .margin-view-overlays .cldr,
+.monaco-container .monaco-editor .margin-view-overlays .cmdr {
+  background: transparent !important;
 }
 
 .monaco-container .monaco-editor .line-numbers {
+  background: transparent !important;
   color: #c7c7c7 !important;
+  /* Center the digit within the line-number column (Monaco right-aligns by default) */
+  text-align: center !important;
 }
 
 .monaco-container .monaco-editor .current-line-number {

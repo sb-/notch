@@ -123,7 +123,7 @@ export default function CodeCell({
             lineNumbers: 'on',
             glyphMargin: false,
             folding: false,
-            lineDecorationsWidth: 0,
+            lineDecorationsWidth: 12,
             lineNumbersMinChars: 3,
             scrollBeyondLastLine: false,
             fontSize: EDITOR_FONT_SIZE,
