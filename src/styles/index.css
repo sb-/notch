@@ -1201,7 +1201,9 @@ body {
 
 .monaco-container {
   width: 100%;
-  min-height: 60px;
+  /* One line: EDITOR_LINE_HEIGHT (21) + HORIZONTAL_SCROLLBAR_RESERVE (8) in CodeCell.tsx.
+     The inline height from JS drives the real size; this is just a floor. */
+  min-height: 29px;
   background: #1e1e1e;
 }
 
