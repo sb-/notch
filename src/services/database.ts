@@ -993,6 +993,32 @@ export async function searchNotes(query: string): Promise<Note[]> {
 // ==================== LINK REWRITING ====================
 
 /**
+ * Rewrite quiver-note-url links in a single string given a UUID→noteId map.
+ * Handles the various Quiver URL spellings -- `quiver-note-url://UUID`,
+ * `quiver-note-url:UUID`, and the bare `quiver-note-url/UUID` form (issue #2).
+ * UUIDs are matched case-insensitively; unresolved links are left untouched.
+ * Pure and exported for testing.
+ */
+export function rewriteQuiverLinksInText(
+  text: string,
+  uuidToNoteId: Map<string, string>
+): { text: string; rewritten: number } {
+  let rewritten = 0;
+  const updated = text.replace(
+    /quiver-note-url:?\/?\/?\/?([0-9A-Fa-f-]+)/gi,
+    (match, quiverUuid) => {
+      const noteId = uuidToNoteId.get(quiverUuid.toLowerCase());
+      if (noteId) {
+        rewritten++;
+        return `notch://note/${noteId}`;
+      }
+      return match; // leave unresolved links unchanged
+    }
+  );
+  return { text: updated, rewritten };
+}
+
+/**
  * Rewrite quiver-note-url:// links to notch://note/ links in all cell data.
  * Builds a map from Quiver source UUIDs to Notch note IDs, then replaces
  * all matching URLs in cell data.
@@ -1016,17 +1042,8 @@ export async function rewriteQuiverNoteLinks(): Promise<number> {
 
   let rewritten = 0;
   for (const cell of cellRows) {
-    const updated = cell.data.replace(
-      /quiver-note-url:?\/?\/?\/?([0-9A-Fa-f-]+)/gi,
-      (match, quiverUuid) => {
-        const noteId = uuidToNoteId.get(quiverUuid.toLowerCase());
-        if (noteId) {
-          rewritten++;
-          return `notch://note/${noteId}`;
-        }
-        return match; // leave unresolved links unchanged
-      }
-    );
+    const { text: updated, rewritten: count } = rewriteQuiverLinksInText(cell.data, uuidToNoteId);
+    rewritten += count;
     if (updated !== cell.data) {
       await getDb().execute('UPDATE cells SET data = ? WHERE id = ?', [updated, cell.id]);
     }
