@@ -149,8 +149,11 @@ export default function TextCell({
     e.preventDefault();
     const html = e.clipboardData.getData('text/html');
     const text = e.clipboardData.getData('text/plain');
-    const content = html ? sanitizeRichText(html) : text;
-    document.execCommand('insertHTML', false, content);
+    if (html) {
+      document.execCommand('insertHTML', false, sanitizeRichText(html));
+    } else {
+      document.execCommand('insertText', false, text);
+    }
   }, [insertImageFiles]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
