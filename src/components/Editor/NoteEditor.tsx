@@ -55,6 +55,8 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   const addTagToNote = useStore(state => state.addTagToNote);
   const removeTagFromNote = useStore(state => state.removeTagFromNote);
   const createTag = useStore(state => state.createTag);
+  const toggleAssistant = useStore(state => state.toggleAssistant);
+  const assistantVisible = useStore(state => state.assistantVisible);
 
   const [showCellTypeMenu, setShowCellTypeMenu] = useState(false);
   const [showTagMenu, setShowTagMenu] = useState(false);
@@ -82,6 +84,13 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   // "Text Cell" while focusedCellId catches up after a note/cell switch.
   const focusedCell = note?.cells.find(c => c.id === focusedCellId) ?? note?.cells[0] ?? null;
   const effectiveFocusedCellId = focusedCell?.id ?? null;
+
+  // Mirror the focused cell to the store so other panels (e.g. the assistant)
+  // can insert into the cell the user is actually working in.
+  const setFocusedCellIdStore = useStore(state => state.setFocusedCellId);
+  useEffect(() => {
+    setFocusedCellIdStore(effectiveFocusedCellId);
+  }, [effectiveFocusedCellId, setFocusedCellIdStore]);
   const currentCellType = focusedCell?.type || 'text';
   const currentCodeLanguage = toMonacoLanguage(focusedCell?.language || 'javascript');
   const hasKnownCodeLanguage = LANGUAGE_OPTIONS.some(option => option.id === currentCodeLanguage);
@@ -563,6 +572,15 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
             <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
             <circle cx="8.5" cy="8.5" r="1.5"/>
             <polyline points="21 15 16 10 5 21"/>
+          </svg>
+        </button>
+        <button
+          className={`editor-footer-btn ${assistantVisible ? 'active' : ''}`}
+          title="Toggle Assistant (⌘J)"
+          onClick={() => toggleAssistant()}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
         </button>
       </div>

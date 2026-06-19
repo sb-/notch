@@ -25,12 +25,14 @@ export const useStore = create<Store>((set, get) => ({
   layoutMode: 'triple',
   editorViewMode: 'split',
   sidebarVisible: true,
+  assistantVisible: false,
 
   // Initial selection state
   selectedNotebookId: null,
   selectedNoteId: null,
   selectedCollection: 'all',
   selectedTagId: null,
+  focusedCellId: null,
 
   // Initial data
   notebooks: [],
@@ -52,6 +54,12 @@ export const useStore = create<Store>((set, get) => ({
   setEditorViewMode: (mode: EditorViewMode) => set({ editorViewMode: mode }),
 
   toggleSidebar: () => set(state => ({ sidebarVisible: !state.sidebarVisible })),
+
+  toggleAssistant: () => set(state => ({ assistantVisible: !state.assistantVisible })),
+
+  setAssistantVisible: (visible: boolean) => set({ assistantVisible: visible }),
+
+  setFocusedCellId: (id: string | null) => set({ focusedCellId: id }),
 
   // ==================== SELECTION ACTIONS ====================
 
