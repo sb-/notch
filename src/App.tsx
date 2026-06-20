@@ -146,12 +146,13 @@ export default function App() {
   }, [activateLibrary]);
 
   const handleOpenLibrary = useCallback(async () => {
+    // A .notch library is a macOS package (registered document type), so it must
+    // be picked in file mode with the extension filter — directory mode greys
+    // packages out. Mirrors the Quiver .qvlibrary import dialog.
     const selected = await open({
       multiple: false,
-      directory: true,
-      recursive: false,
-      fileAccessMode: 'scoped',
       title: 'Open Notch Library (.notch)',
+      filters: [{ name: 'Notch Library', extensions: ['notch'] }],
     });
 
     if (!selected || Array.isArray(selected)) return;
