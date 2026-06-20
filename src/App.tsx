@@ -15,6 +15,7 @@ import {
   libraryFilename,
   markLibraryLocationPrompted,
   openLibrary,
+  renameLibrary,
   refreshLibrary,
   setActiveLibraryId,
   shouldPromptForLibraryLocation,
@@ -79,7 +80,10 @@ export default function App() {
   const [activeLibraryId, setActiveLibrary] = useState(() => getActiveLibraryId());
   const [isCreateLibraryOpen, setIsCreateLibraryOpen] = useState(false);
   const [newLibraryName, setNewLibraryName] = useState('');
+  const [isRenameLibraryOpen, setIsRenameLibraryOpen] = useState(false);
+  const [renameLibraryName, setRenameLibraryName] = useState('');
   const newLibraryInputRef = useRef<HTMLInputElement>(null);
+  const renameLibraryInputRef = useRef<HTMLInputElement>(null);
   const firstLaunchPromptedRef = useRef(false);
   const loadData = useStore(state => state.loadData);
   const layoutMode = useLayoutMode();
@@ -98,6 +102,27 @@ export default function App() {
       newLibraryInputRef.current?.focus();
     });
   }, [isCreateLibraryOpen]);
+
+  const handleRenameLibrary = useCallback(() => {
+    if (!activeLibrary?.path) {
+      void message('The default library cannot be renamed. Create or open a library first.', {
+        title: 'Rename Library',
+        kind: 'info',
+      });
+      return;
+    }
+    setRenameLibraryName(activeLibrary.name);
+    setIsRenameLibraryOpen(true);
+  }, [activeLibrary]);
+
+  useEffect(() => {
+    if (!isRenameLibraryOpen) return;
+
+    requestAnimationFrame(() => {
+      renameLibraryInputRef.current?.focus();
+      renameLibraryInputRef.current?.select();
+    });
+  }, [isRenameLibraryOpen]);
 
   const activateLibrary = useCallback(async (library: LibraryInfo) => {
     const nextLibraries = getLibraries();
@@ -476,6 +501,32 @@ export default function App() {
     setNewLibraryName('');
   };
 
+  const closeRenameLibraryDialog = () => {
+    setIsRenameLibraryOpen(false);
+    setRenameLibraryName('');
+  };
+
+  const handleRenameLibrarySubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const name = renameLibraryName.trim();
+    if (!name || !activeLibrary) {
+      renameLibraryInputRef.current?.focus();
+      return;
+    }
+
+    try {
+      await renameLibrary(activeLibrary, name);
+      setLibraries(getLibraries());
+      closeRenameLibraryDialog();
+    } catch (err) {
+      await message(`Could not rename library: ${getErrorMessage(err)}`, {
+        title: 'Rename Library',
+        kind: 'error',
+      });
+    }
+  };
+
   const handleCreateLibrarySubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
@@ -793,6 +844,7 @@ export default function App() {
             activeLibraryId={activeLibraryId}
             onSelectLibrary={handleSelectLibrary}
             onCreateLibrary={handleCreateLibrary}
+            onRenameLibrary={handleRenameLibrary}
             onOpenLibrary={handleOpenLibrary}
           />
           <div
@@ -849,6 +901,37 @@ export default function App() {
               </button>
               <button type="submit" className="library-dialog-button primary" disabled={!newLibraryName.trim()}>
                 Create
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+      {isRenameLibraryOpen && (
+        <div className="library-dialog-overlay" onClick={closeRenameLibraryDialog}>
+          <form className="library-dialog" onSubmit={handleRenameLibrarySubmit} onClick={e => e.stopPropagation()}>
+            <div className="library-dialog-title">Rename Library</div>
+            <label className="library-dialog-label" htmlFor="rename-library-name">
+              Name
+            </label>
+            <input
+              ref={renameLibraryInputRef}
+              id="rename-library-name"
+              className="library-dialog-input"
+              type="text"
+              value={renameLibraryName}
+              onChange={e => setRenameLibraryName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Escape') {
+                  closeRenameLibraryDialog();
+                }
+              }}
+            />
+            <div className="library-dialog-actions">
+              <button type="button" className="library-dialog-button" onClick={closeRenameLibraryDialog}>
+                Cancel
+              </button>
+              <button type="submit" className="library-dialog-button primary" disabled={!renameLibraryName.trim()}>
+                Rename
               </button>
             </div>
           </form>

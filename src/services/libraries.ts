@@ -135,6 +135,15 @@ export async function openLibrary(path: string): Promise<LibraryInfo> {
   return library;
 }
 
+export async function renameLibrary(library: LibraryInfo, name: string): Promise<LibraryInfo> {
+  if (!library.path) {
+    throw new Error('The default library cannot be renamed.');
+  }
+  const renamed = await invoke<LibraryInfo>('rename_library_package', { path: library.path, name });
+  upsertLibrary(renamed);
+  return renamed;
+}
+
 export async function refreshLibrary(library: LibraryInfo): Promise<LibraryInfo> {
   if (!library.path) return library;
 

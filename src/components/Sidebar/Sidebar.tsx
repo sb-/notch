@@ -231,6 +231,7 @@ interface SidebarProps {
   activeLibraryId?: string;
   onSelectLibrary?: (libraryId: string) => void;
   onCreateLibrary?: () => void;
+  onRenameLibrary?: () => void;
   onOpenLibrary?: () => void;
 }
 
@@ -239,6 +240,7 @@ export default function Sidebar({
   activeLibraryId,
   onSelectLibrary,
   onCreateLibrary,
+  onRenameLibrary,
   onOpenLibrary,
 }: SidebarProps = {}) {
   const [activeTab, setActiveTab] = useState<'notebooks' | 'tags'>('notebooks');
@@ -467,6 +469,17 @@ export default function Sidebar({
                 </button>
               ))}
               <div className="context-menu-separator" />
+              {activeLibrary.path && (
+                <button
+                  className="library-menu-item"
+                  onClick={() => {
+                    onRenameLibrary?.();
+                    setShowLibraryMenu(false);
+                  }}
+                >
+                  Rename Library...
+                </button>
+              )}
               <button
                 className="library-menu-item"
                 onClick={() => {

@@ -60,6 +60,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             create_library_package,
             open_library_package,
+            rename_library_package,
             take_pending_library_path
         ])
         .setup(|app| {
@@ -215,6 +216,15 @@ fn open_library_package(path: String) -> Result<LibraryInfo, String> {
             .map_err(|err| format!("Could not create library database: {err}"))?;
     }
 
+    library_info(dir, manifest)
+}
+
+#[tauri::command]
+fn rename_library_package(path: String, name: String) -> Result<LibraryInfo, String> {
+    let dir = library_dir_from_path(Path::new(&path))?;
+    let mut manifest = read_manifest(&dir)?;
+    manifest.name = normalize_library_name(&name);
+    write_manifest(&dir, &manifest)?;
     library_info(dir, manifest)
 }
 
