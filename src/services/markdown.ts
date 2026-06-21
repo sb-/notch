@@ -80,17 +80,24 @@ const inlineMath = {
 //
 // The pattern is a hand-rolled clone of marked's image rule, composed from
 // labeled fragments so each maps to one part of the grammar. Known limits
-// (acceptable for this app's resource URLs): alt cannot contain `]`, href
-// cannot contain spaces, and only double-quoted titles are recognized.
+// (acceptable for this app's resource URLs): alt cannot contain an unescaped
+// `]`, href cannot contain spaces, and only double-quoted titles are recognized.
 const SIZED_IMAGE_RE = new RegExp(
   '^' + [
-    /!\[([^\]]*)\]/,        // ![alt]                  -> group 1: alt text
-    /\(\s*<?([^\s>]+)>?/,   // (url  (optional <...>)   -> group 2: href
-    /\s+=(\d*)x(\d*)/,      //  =WxH                    -> groups 3, 4: width, height
-    /(?:\s+"([^"]*)")?/,    //  "title"  (optional)     -> group 5: title
-    /\s*\)/,                // )
+    /!\[((?:\\.|[^\]])*)\]/, // ![alt]  (\] escapes ok)  -> group 1: alt text
+    /\(\s*<?([^\s>]+)>?/,    // (url  (optional <...>)   -> group 2: href
+    /\s+=(\d*)x(\d*)/,       //  =WxH                    -> groups 3, 4: width, height
+    /(?:\s+"([^"]*)")?/,     //  "title"  (optional)     -> group 5: title
+    /\s*\)/,                 // )
   ].map((part) => part.source).join(''),
 );
+
+// Undo CommonMark backslash escapes (e.g. `\]` -> `]`) so the alt text we emit
+// matches what marked produces for plain images.
+const ESCAPED_PUNCT = /\\([!"#$%&'()*+,\-./:;<=>?@[\]^_`{|}~])/g;
+function unescapeMarkdown(text: string): string {
+  return text.replace(ESCAPED_PUNCT, '$1');
+}
 
 const sizedImage = {
   name: 'sizedImage',
@@ -107,7 +114,7 @@ const sizedImage = {
     return {
       type: 'sizedImage',
       raw: match[0],
-      text: match[1] ?? '',
+      text: unescapeMarkdown(match[1] ?? ''),
       href: match[2] ?? '',
       width: match[3] ?? '',
       height: match[4] ?? '',

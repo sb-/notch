@@ -27,6 +27,12 @@ test('preserves alt text and title alongside size', () => {
   expect(html).toContain('width="300"');
 });
 
+test('escaped `]` in alt is supported and unescaped', () => {
+  const html = renderMarkdown('![a \\] b](https://example.com/cat.png =400x)');
+  expect(html).toContain('alt="a ] b"');
+  expect(html).toContain('width="400"');
+});
+
 test('plain images without a size suffix are unaffected', () => {
   const html = renderMarkdown('![cat](https://example.com/cat.png)');
   expect(html).toContain('src="https://example.com/cat.png"');
