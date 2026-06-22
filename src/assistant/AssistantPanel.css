@@ -236,6 +236,7 @@
 
 .assistant-input-row {
   display: flex;
+  align-items: flex-end;
   gap: 6px;
   padding: 8px;
   border-top: 1px solid var(--divider-color);
@@ -251,6 +252,10 @@
   padding: 6px 8px;
   font-family: var(--font-sans);
   font-size: var(--font-size-md);
+  line-height: 1.4;
+  max-height: 140px;
+  overflow-y: auto;
+  display: block;
 }
 .assistant-input:focus {
   outline: none;
@@ -413,4 +418,10 @@
   font-size: var(--font-size-xs);
   color: var(--text-tertiary);
   margin: 0;
+}
+.assistant-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
 }

@@ -1,12 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Agent } from '@earendil-works/pi-agent-core';
 import { useStore, useSelectedNote } from '../store';
 import { renderMarkdown } from '../services/markdown';
 import {
   getAssistantSettings,
-  saveAssistantSettings,
   isAssistantConfigured,
-  LOCAL_MODEL_PRESETS,
   type AssistantSettings,
 } from './settings';
 import { createNoteAgent, setAgentContext, extractText } from './agent';
@@ -122,7 +120,8 @@ export default function AssistantPanel() {
   const currentNote = useSelectedNote();
 
   const [settings, setSettings] = useState<AssistantSettings>(() => getAssistantSettings());
-  const [showSettings, setShowSettings] = useState(() => !isAssistantConfigured(getAssistantSettings()));
+  const settingsVersion = useStore(state => state.assistantSettingsVersion);
+  const openSettings = useStore(state => state.setSettingsOpen);
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -144,6 +143,11 @@ export default function AssistantPanel() {
   const pinnedToBottomRef = useRef(true);
   const configured = isAssistantConfigured(settings);
   const mentionOpen = mention !== null && mentionItems.length > 0;
+
+  // Re-read settings whenever they're saved (in the Settings modal).
+  useEffect(() => {
+    setSettings(getAssistantSettings());
+  }, [settingsVersion]);
 
   // Build (or rebuild) the agent whenever the effective settings change.
   useEffect(() => {
@@ -185,6 +189,14 @@ export default function AssistantPanel() {
     const el = scrollRef.current;
     if (el) pinnedToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
   };
+
+  // Auto-grow the input from a single line up to a max as the user types.
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+  }, [input]);
 
   const send = useCallback(async () => {
     const agent = agentRef.current;
@@ -276,30 +288,19 @@ export default function AssistantPanel() {
       <div className="assistant-header">
         <span className="assistant-title">Assistant</span>
         <div className="assistant-header-actions">
-          <button className="assistant-icon-btn" title="Settings" onClick={() => setShowSettings(s => !s)}>⚙</button>
+          <button className="assistant-icon-btn" title="Settings" onClick={() => openSettings(true)}>⚙</button>
           <button className="assistant-icon-btn" title="Close" onClick={() => setAssistantVisible(false)}>✕</button>
         </div>
       </div>
 
-      {showSettings && (
-        <AssistantSettingsForm
-          initial={settings}
-          onSave={next => {
-            saveAssistantSettings(next);
-            setSettings(next);
-            setShowSettings(false);
-          }}
-        />
-      )}
-
-      {!showSettings && !configured && (
+      {!configured && (
         <div className="assistant-empty">
-          <p>The assistant is off. Open settings to enable it and pick a local model.</p>
-          <button className="assistant-send-btn" onClick={() => setShowSettings(true)}>Open settings</button>
+          <p>The assistant is off. Open settings to enable it and pick a model.</p>
+          <button className="assistant-send-btn" onClick={() => openSettings(true)}>Open settings</button>
         </div>
       )}
 
-      {!showSettings && configured && (
+      {configured && (
         <>
           <div className="assistant-context-bar">
             <span className="assistant-context-label">Context</span>
@@ -385,11 +386,11 @@ export default function AssistantPanel() {
             <textarea
               ref={inputRef}
               className="assistant-input"
-              placeholder="Ask the assistant…  (@ to reference a note or notebook)"
+              placeholder="Ask the assistant…  (@ to reference)"
               value={input}
               onChange={handleInputChange}
               onKeyDown={onKeyDown}
-              rows={2}
+              rows={1}
             />
             {busy ? (
               <button className="assistant-send-btn" onClick={() => agentRef.current?.abort()}>Stop</button>
@@ -429,83 +430,6 @@ function MessageBubble({ message, canInsert, onInsert }: {
           Insert into note
         </button>
       )}
-    </div>
-  );
-}
-
-function AssistantSettingsForm({ initial, onSave }: {
-  initial: AssistantSettings;
-  onSave: (s: AssistantSettings) => void;
-}) {
-  const [draft, setDraft] = useState<AssistantSettings>(initial);
-  const update = (patch: Partial<AssistantSettings>) => setDraft(d => ({ ...d, ...patch }));
-
-  return (
-    <div className="assistant-settings">
-      <label className="assistant-field assistant-field-row">
-        <input
-          type="checkbox"
-          checked={draft.enabled}
-          onChange={e => update({ enabled: e.target.checked })}
-        />
-        <span>Enable assistant</span>
-      </label>
-
-      <label className="assistant-field">
-        <span>Model preset</span>
-        <select
-          value={LOCAL_MODEL_PRESETS.find(p => p.model === draft.model)?.model ?? ''}
-          onChange={e => {
-            const preset = LOCAL_MODEL_PRESETS.find(p => p.model === e.target.value);
-            if (preset) update({
-              provider: preset.provider,
-              baseUrl: preset.baseUrl,
-              model: preset.model,
-              contextWindow: preset.contextWindow,
-              maxTokens: preset.maxTokens,
-              supportsTools: preset.supportsTools,
-            });
-          }}
-        >
-          <option value="">Custom</option>
-          {LOCAL_MODEL_PRESETS.map(p => <option key={p.model} value={p.model}>{p.label}</option>)}
-        </select>
-      </label>
-
-      <label className="assistant-field">
-        <span>Model id</span>
-        <input value={draft.model} onChange={e => update({ model: e.target.value })} />
-      </label>
-
-      <label className="assistant-field">
-        <span>Base URL</span>
-        <input value={draft.baseUrl} onChange={e => update({ baseUrl: e.target.value })} />
-      </label>
-
-      <label className="assistant-field">
-        <span>API key</span>
-        <input
-          type="password"
-          value={draft.apiKey}
-          onChange={e => update({ apiKey: e.target.value })}
-          placeholder="ollama (for local)"
-        />
-      </label>
-
-      <label className="assistant-field assistant-field-row">
-        <input
-          type="checkbox"
-          checked={draft.supportsTools}
-          onChange={e => update({ supportsTools: e.target.checked })}
-        />
-        <span>Let it search my notes (needs a tool-capable model)</span>
-      </label>
-
-      <p className="assistant-settings-note">
-        Note tools (search/read) need a tool-capable model — the Gemma 4 models support them; Gemma 3 4B is chat-only. With a chat-only model the assistant still answers about the open note.
-      </p>
-
-      <button className="assistant-send-btn" onClick={() => onSave(draft)}>Save</button>
     </div>
   );
 }

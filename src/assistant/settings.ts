@@ -100,6 +100,19 @@ export function saveAssistantSettings(settings: AssistantSettings): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
 }
 
+/**
+ * Fetch the models the endpoint advertises via the OpenAI-compatible
+ * `/models` route (Ollama serves this at /v1/models). Returns sorted unique ids.
+ */
+export async function fetchAvailableModels(baseUrl: string, apiKey: string): Promise<string[]> {
+  const url = `${baseUrl.replace(/\/+$/, '')}/models`;
+  const res = await fetch(url, apiKey ? { headers: { Authorization: `Bearer ${apiKey}` } } : undefined);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = (await res.json()) as { data?: { id?: string }[] };
+  const ids = (json.data ?? []).map(m => m.id).filter((id): id is string => !!id);
+  return Array.from(new Set(ids)).sort();
+}
+
 /** True when the assistant has the minimum config needed to run. */
 export function isAssistantConfigured(settings: AssistantSettings): boolean {
   return (

@@ -26,6 +26,8 @@ export const useStore = create<Store>((set, get) => ({
   editorViewMode: 'split',
   sidebarVisible: true,
   assistantVisible: false,
+  settingsOpen: false,
+  assistantSettingsVersion: 0,
 
   // Initial selection state
   selectedNotebookId: null,
@@ -58,6 +60,10 @@ export const useStore = create<Store>((set, get) => ({
   toggleAssistant: () => set(state => ({ assistantVisible: !state.assistantVisible })),
 
   setAssistantVisible: (visible: boolean) => set({ assistantVisible: visible }),
+
+  setSettingsOpen: (open: boolean) => set({ settingsOpen: open }),
+
+  bumpAssistantSettings: () => set(state => ({ assistantSettingsVersion: state.assistantSettingsVersion + 1 })),
 
   setFocusedCellId: (id: string | null) => set({ focusedCellId: id }),
 

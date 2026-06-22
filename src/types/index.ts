@@ -77,6 +77,10 @@ export interface AppState {
   editorViewMode: EditorViewMode;
   sidebarVisible: boolean;
   assistantVisible: boolean;
+  /** Whether the app Settings modal is open. */
+  settingsOpen: boolean;
+  /** Bumped whenever assistant settings are saved, so consumers can re-read them. */
+  assistantSettingsVersion: number;
 
   // Selection state
   selectedNotebookId: string | null;
@@ -108,6 +112,8 @@ export interface AppActions {
   toggleSidebar: () => void;
   toggleAssistant: () => void;
   setAssistantVisible: (visible: boolean) => void;
+  setSettingsOpen: (open: boolean) => void;
+  bumpAssistantSettings: () => void;
 
   // Selection actions
   selectNotebook: (id: string | null) => void;

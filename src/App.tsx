@@ -26,6 +26,7 @@ import Sidebar from './components/Sidebar/Sidebar';
 import NoteList from './components/NoteList/NoteList';
 import NoteEditor from './components/Editor/NoteEditor';
 import SearchOverlay from './components/Search/SearchOverlay';
+import SettingsModal from './components/Settings/SettingsModal';
 import type { EditorViewMode, LayoutMode } from './types';
 
 // Lazy so the assistant (and the pi packages it pulls) only load when shown,
@@ -785,6 +786,11 @@ export default function App() {
         e.preventDefault();
         useStore.getState().toggleAssistant();
       }
+      // Cmd+,: Open settings
+      if (e.metaKey && e.key === ',') {
+        e.preventDefault();
+        useStore.getState().setSettingsOpen(true);
+      }
       // Cmd+4: Editor only
       if (e.metaKey && e.key === '4') {
         e.preventDefault();
@@ -867,6 +873,7 @@ export default function App() {
             onCreateLibrary={handleCreateLibrary}
             onRenameLibrary={handleRenameLibrary}
             onOpenLibrary={handleOpenLibrary}
+            onOpenSettings={() => useStore.getState().setSettingsOpen(true)}
           />
           <div
             className="column-resizer"
@@ -912,6 +919,7 @@ export default function App() {
         </>
       )}
       {showSearch && <SearchOverlay onClose={() => setShowSearch(false)} />}
+      <SettingsModal />
       {isCreateLibraryOpen && (
         <div className="library-dialog-overlay" onClick={closeCreateLibraryDialog}>
           <form className="library-dialog" onSubmit={handleCreateLibrarySubmit} onClick={e => e.stopPropagation()}>
