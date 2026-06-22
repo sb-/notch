@@ -1,4 +1,5 @@
-import { useRef, useEffect, useLayoutEffect } from 'react';
+import { useRef, useEffect, useMemo } from 'react';
+import hljs from 'highlight.js';
 import { createResourceFromFile, RESOURCE_PROTOCOL } from '../../../services/resources';
 
 interface MarkdownCellProps {
@@ -12,21 +13,33 @@ interface MarkdownCellProps {
   onNavigateNext?: () => void;
 }
 
+// Above this size, skip highlighting and render plain text so very large cells
+// stay responsive (highlighting is O(n) per keystroke).
+const HIGHLIGHT_LIMIT = 50_000;
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocused, onBackspaceEmpty, onNavigatePrev, onNavigateNext }: MarkdownCellProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-resize to fit content so the whole cell is visible (no inner scroll /
-  // overflow). useLayoutEffect runs after the value is in the DOM, so scrollHeight
-  // is accurate even for large pasted content on first mount.
-  const adjustHeight = () => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = 'auto';
-    ta.style.height = `${ta.scrollHeight}px`;
-  };
-
-  useLayoutEffect(() => {
-    adjustHeight();
+  // Highlighted source for the layer behind the (transparent) textarea. The
+  // <pre> sits in normal flow and drives the cell's height, so no JS auto-resize
+  // (and no forced reflow) is needed. Trailing newline keeps the final line/caret
+  // visible. Memoized so unfocused cells don't re-highlight on every keystroke.
+  const highlightedHtml = useMemo(() => {
+    let inner: string;
+    if (data.length > HIGHLIGHT_LIMIT) {
+      inner = escapeHtml(data);
+    } else {
+      try {
+        inner = hljs.highlight(data, { language: 'markdown', ignoreIllegals: true }).value;
+      } catch {
+        inner = escapeHtml(data);
+      }
+    }
+    return `${inner}\n`;
   }, [data]);
 
   // Focus this cell's editor when it becomes the focused cell (e.g. via keyboard
@@ -122,19 +135,25 @@ export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocuse
     }
   };
 
-  // The editor pane always shows raw, editable Markdown. Rendered Markdown is the
-  // job of the preview pane (NotePreview) — keeping this a textarea is the point
-  // of having a separate view panel.
+  // Highlight overlay: a <pre> shows the syntax-highlighted source and sets the
+  // height; the transparent <textarea> on top captures input. The two share
+  // identical text metrics so they stay aligned.
   return (
-    <textarea
-      ref={textareaRef}
-      className="cell-editor"
-      value={data}
-      onChange={handleChange}
-      onFocus={onFocus}
-      onKeyDown={handleKeyDown}
-      onPaste={handlePaste}
-      onDrop={handleDrop}
-    />
+    <div className="markdown-editor">
+      <pre className="markdown-editor-highlight" aria-hidden="true">
+        <code dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+      </pre>
+      <textarea
+        ref={textareaRef}
+        className="markdown-editor-input"
+        value={data}
+        spellCheck={false}
+        onChange={handleChange}
+        onFocus={onFocus}
+        onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
+        onDrop={handleDrop}
+      />
+    </div>
   );
 }

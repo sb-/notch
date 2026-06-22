@@ -1089,6 +1089,72 @@ body {
   border-color: var(--border-color);
 }
 
+/* Markdown cell: syntax-highlighted edit overlay (transparent textarea over a
+   highlighted <pre> that drives the height). The two layers MUST share identical
+   text metrics to stay aligned. */
+.markdown-editor {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  box-sizing: border-box;
+}
+.cell.focused .markdown-editor {
+  border-color: var(--border-color);
+}
+.markdown-editor-highlight,
+.markdown-editor-input {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: 12px 16px;
+  border: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-md);
+  line-height: 1.5;
+  letter-spacing: normal;
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+.markdown-editor-highlight {
+  min-height: calc(1.5em + 24px);
+  color: var(--text-primary);
+  pointer-events: none;
+  overflow: hidden;
+}
+.markdown-editor-highlight code {
+  font: inherit;
+  white-space: inherit;
+  word-break: inherit;
+  overflow-wrap: inherit;
+}
+.markdown-editor-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text-primary);
+  outline: none;
+}
+
+/* Basic markdown token colors (monospace keeps widths so bold/italic stay aligned) */
+.markdown-editor-highlight .hljs-section { color: var(--accent-color); font-weight: 600; }
+.markdown-editor-highlight .hljs-strong { color: var(--text-primary); font-weight: 700; }
+.markdown-editor-highlight .hljs-emphasis { font-style: italic; }
+.markdown-editor-highlight .hljs-bullet { color: var(--accent-color); }
+.markdown-editor-highlight .hljs-quote { color: var(--text-secondary); font-style: italic; }
+.markdown-editor-highlight .hljs-code { color: var(--link-color); }
+.markdown-editor-highlight .hljs-link,
+.markdown-editor-highlight .hljs-string { color: var(--link-color); }
+.markdown-editor-highlight .hljs-symbol { color: var(--text-secondary); }
+
 /* Rich text cell (contentEditable) */
 .cell-richtext {
   max-width: 100%;
