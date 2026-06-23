@@ -13,6 +13,16 @@ interface MathToken {
   text: string;
 }
 
+interface SizedImageToken {
+  type: string;
+  raw: string;
+  text: string;
+  href: string;
+  width: string;
+  height: string;
+  title: string;
+}
+
 function renderMath(text: string, displayMode: boolean): string {
   try {
     return katex.renderToString(text, {
@@ -62,6 +72,65 @@ const inlineMath = {
   },
 };
 
+// Sized images: `![alt](url =WIDTHxHEIGHT)` (Quiver/Typora style). Plain marked
+// drops the whole image when the `=800x` suffix is present (the space breaks its
+// built-in image rule), so we re-parse the image ourselves and emit width/height
+// attributes. Images without a size suffix fall through to marked's built-in
+// image handling (the `image` renderer below).
+//
+// The pattern is a hand-rolled clone of marked's image rule, composed from
+// labeled fragments so each maps to one part of the grammar. Known limits
+// (acceptable for this app's resource URLs): alt cannot contain an unescaped
+// `]`, href cannot contain spaces, and only double-quoted titles are recognized.
+const SIZED_IMAGE_RE = new RegExp(
+  '^' + [
+    /!\[((?:\\.|[^\]])*)\]/, // ![alt]  (\] escapes ok)  -> group 1: alt text
+    /\(\s*<?([^\s>]+)>?/,    // (url  (optional <...>)   -> group 2: href
+    /\s+=(\d*)x(\d*)/,       //  =WxH                    -> groups 3, 4: width, height
+    /(?:\s+"([^"]*)")?/,     //  "title"  (optional)     -> group 5: title
+    /\s*\)/,                 // )
+  ].map((part) => part.source).join(''),
+);
+
+// Undo CommonMark backslash escapes (e.g. `\]` -> `]`) so the alt text we emit
+// matches what marked produces for plain images.
+const ESCAPED_PUNCT = /\\([!"#$%&'()*+,\-./:;<=>?@[\]^_`{|}~])/g;
+function unescapeMarkdown(text: string): string {
+  return text.replace(ESCAPED_PUNCT, '$1');
+}
+
+const sizedImage = {
+  name: 'sizedImage',
+  level: 'inline' as const,
+  start(src: string) {
+    const i = src.indexOf('![');
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src: string): SizedImageToken | undefined {
+    const match = SIZED_IMAGE_RE.exec(src);
+    if (!match) return undefined;
+    // Require at least one dimension; `=x` is not a valid size suffix.
+    if (!match[3] && !match[4]) return undefined;
+    return {
+      type: 'sizedImage',
+      raw: match[0],
+      text: unescapeMarkdown(match[1] ?? ''),
+      href: match[2] ?? '',
+      width: match[3] ?? '',
+      height: match[4] ?? '',
+      title: match[5] ?? '',
+    };
+  },
+  renderer(token: SizedImageToken) {
+    const src = resolveResourceUrl(token.href);
+    const altAttr = token.text ? ` alt="${token.text}"` : '';
+    const widthAttr = token.width ? ` width="${token.width}"` : '';
+    const heightAttr = token.height ? ` height="${token.height}"` : '';
+    const titleAttr = token.title ? ` title="${token.title}"` : '';
+    return `<img src="${src}"${altAttr}${widthAttr}${heightAttr}${titleAttr} />`;
+  },
+};
+
 md.use({
   gfm: true,
   breaks: true,
@@ -71,7 +140,7 @@ md.use({
       return undefined;
     },
   },
-  extensions: [blockMath, inlineMath],
+  extensions: [blockMath, inlineMath, sizedImage],
   renderer: {
     // Preserve notch:// and quiver-note-url:// protocols on links.
     link(href: string, title: string | null | undefined, text: string) {
