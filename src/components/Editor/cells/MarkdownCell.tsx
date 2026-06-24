@@ -1,6 +1,6 @@
 import { useRef, useEffect, useMemo } from 'react';
-import hljs from 'highlight.js';
 import { createResourceFromFile, RESOURCE_PROTOCOL } from '../../../services/resources';
+import { highlightMarkdownSource } from '../../../services/markdownHighlight';
 
 interface MarkdownCellProps {
   noteId: string;
@@ -34,7 +34,7 @@ export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocuse
       inner = escapeHtml(data);
     } else {
       try {
-        inner = hljs.highlight(data, { language: 'markdown', ignoreIllegals: true }).value;
+        inner = highlightMarkdownSource(data);
       } catch {
         inner = escapeHtml(data);
       }
