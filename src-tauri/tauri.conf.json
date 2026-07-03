@@ -4,7 +4,7 @@
   "version": "0.2.1",
   "identifier": "com.notch.app",
   "build": {
-    "beforeDevCommand": "bun run --hot src/index.ts",
+    "beforeDevCommand": "bun run --hot scripts/dev-frontend.ts",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "bun run build:frontend",
     "frontendDist": "../dist"

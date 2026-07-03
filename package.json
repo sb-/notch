@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "bunx tauri dev",
-    "dev:frontend": "bun run --hot src/index.ts",
+    "dev:frontend": "bun run --hot scripts/dev-frontend.ts",
     "build": "bunx tauri build",
     "build:frontend": "bun build src/index.html --outdir dist --production --splitting",
     "preview": "bun run src/index.ts",
