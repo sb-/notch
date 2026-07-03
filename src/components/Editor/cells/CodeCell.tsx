@@ -38,9 +38,10 @@ export default function CodeCell({
     dataRef.current = data;
   }, [data]);
 
-  useEffect(() => {
-    editorRef.current?.layout();
-  }, [editorHeight]);
+  // No manual layout() on height change: `automaticLayout` already observes the
+  // container (and is needed for width changes when the editor column resizes),
+  // so it re-lays-out when the height style updates. Calling it here too caused a
+  // redundant second layout pass on every line add/remove.
 
   const syncEditorHeight = useCallback((editor = editorRef.current) => {
     if (!editor) return;

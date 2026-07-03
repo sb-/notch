@@ -1,4 +1,4 @@
-import { useRef, useEffect, useMemo } from 'react';
+import { useRef, useEffect, useMemo, useState } from 'react';
 import { createResourceFromFile, RESOURCE_PROTOCOL } from '../../../services/resources';
 import { highlightMarkdownSource } from '../../../services/markdownHighlight';
 
@@ -16,31 +16,50 @@ interface MarkdownCellProps {
 // Above this size, skip highlighting and render plain text so very large cells
 // stay responsive (highlighting is O(n) per keystroke).
 const HIGHLIGHT_LIMIT = 50_000;
+// Re-colour the overlay this long after typing pauses. While typing we show
+// instant plain text; colours catch up once the burst ends.
+const HIGHLIGHT_DEBOUNCE_MS = 80;
 
 function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// Trailing newline keeps the final line/caret visible behind the textarea.
+function buildOverlayHtml(src: string): string {
+  if (src.length > HIGHLIGHT_LIMIT) return `${escapeHtml(src)}\n`;
+  try {
+    return `${highlightMarkdownSource(src)}\n`;
+  } catch {
+    return `${escapeHtml(src)}\n`;
+  }
+}
+
 export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocused, onBackspaceEmpty, onNavigatePrev, onNavigateNext }: MarkdownCellProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Highlighted source for the layer behind the (transparent) textarea. The
-  // <pre> sits in normal flow and drives the cell's height, so no JS auto-resize
-  // (and no forced reflow) is needed. Trailing newline keeps the final line/caret
-  // visible. Memoized so unfocused cells don't re-highlight on every keystroke.
-  const highlightedHtml = useMemo(() => {
-    let inner: string;
-    if (data.length > HIGHLIGHT_LIMIT) {
-      inner = escapeHtml(data);
-    } else {
-      try {
-        inner = highlightMarkdownSource(data);
-      } catch {
-        inner = escapeHtml(data);
-      }
-    }
-    return `${inner}\n`;
-  }, [data]);
+  // The transparent textarea shows nothing itself — the visible text is the <pre>
+  // highlight layer behind it. highlight.js has no incremental mode, so colouring
+  // the whole source on every keystroke is O(n) and reads as typing lag in large
+  // cells. So we render escaped plain text instantly (keeps the caret aligned and
+  // the just-typed character visible) and recompute the colours on a short
+  // debounce once typing pauses. First mount highlights synchronously so opening a
+  // note isn't a flash of uncoloured text.
+  const [highlighted, setHighlighted] = useState(() => ({ src: data, html: buildOverlayHtml(data) }));
+
+  // Cheap, always-current overlay used while typing.
+  const plainHtml = useMemo(() => `${escapeHtml(data)}\n`, [data]);
+
+  // Use the coloured version only when it matches the current text, so a stale
+  // highlight never hides freshly-typed characters.
+  const highlightedHtml = highlighted.src === data ? highlighted.html : plainHtml;
+
+  useEffect(() => {
+    if (highlighted.src === data) return;
+    const handle = setTimeout(() => {
+      setHighlighted({ src: data, html: buildOverlayHtml(data) });
+    }, HIGHLIGHT_DEBOUNCE_MS);
+    return () => clearTimeout(handle);
+  }, [data, highlighted.src]);
 
   // Focus this cell's editor when it becomes the focused cell (e.g. via keyboard
   // navigation), without stealing focus while the user types elsewhere.
