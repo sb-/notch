@@ -2005,7 +2005,10 @@ body {
   appearance: none;
   -webkit-appearance: none;
   min-width: 168px;
-  height: 30px;
+  /* Match .format-btn height so the toolbar is the same height for every cell
+     type (the code-cell select used to be 4px taller than the format buttons,
+     making the bar jump when a code cell was selected). */
+  height: 26px;
   background: var(--bg-primary);
   color: var(--text-primary);
   border: 1px solid var(--border-color);
