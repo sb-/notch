@@ -76,12 +76,19 @@ export interface AppState {
   layoutMode: LayoutMode;
   editorViewMode: EditorViewMode;
   sidebarVisible: boolean;
+  assistantVisible: boolean;
+  /** Whether the app Settings modal is open. */
+  settingsOpen: boolean;
+  /** Bumped whenever assistant settings are saved, so consumers can re-read them. */
+  assistantSettingsVersion: number;
 
   // Selection state
   selectedNotebookId: string | null;
   selectedNoteId: string | null;
   selectedCollection: SpecialCollection | null;
   selectedTagId: string | null;
+  /** Id of the cell currently focused in the editor (mirrored from NoteEditor for cross-component use). */
+  focusedCellId: string | null;
 
   // Data
   notebooks: Notebook[];
@@ -103,12 +110,17 @@ export interface AppActions {
   setLayoutMode: (mode: LayoutMode) => void;
   setEditorViewMode: (mode: EditorViewMode) => void;
   toggleSidebar: () => void;
+  toggleAssistant: () => void;
+  setAssistantVisible: (visible: boolean) => void;
+  setSettingsOpen: (open: boolean) => void;
+  bumpAssistantSettings: () => void;
 
   // Selection actions
   selectNotebook: (id: string | null) => void;
   selectNote: (id: string | null) => void;
   selectCollection: (collection: SpecialCollection | null) => void;
   selectTag: (id: string | null) => void;
+  setFocusedCellId: (id: string | null) => void;
 
   // Notebook actions
   createNotebook: (name: string, parentId?: string) => Promise<Notebook>;

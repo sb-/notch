@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react';
 import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { open, save, message, ask } from '@tauri-apps/plugin-dialog';
@@ -26,10 +26,16 @@ import Sidebar from './components/Sidebar/Sidebar';
 import NoteList from './components/NoteList/NoteList';
 import NoteEditor from './components/Editor/NoteEditor';
 import SearchOverlay from './components/Search/SearchOverlay';
+import SettingsModal from './components/Settings/SettingsModal';
 import type { EditorViewMode, LayoutMode } from './types';
+
+// Lazy so the assistant (and the pi packages it pulls) only load when shown,
+// keeping the core editor lightweight when the assistant is off.
+const AssistantPanel = lazy(() => import('./assistant/AssistantPanel'));
 
 const SIDEBAR_WIDTH_KEY = 'notch.sidebarWidth';
 const NOTELIST_WIDTH_KEY = 'notch.noteListWidth';
+const ASSISTANT_WIDTH_KEY = 'notch.assistantWidth';
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
@@ -76,6 +82,8 @@ export default function App() {
   const [showFindBar, setShowFindBar] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(() => getStoredWidth(SIDEBAR_WIDTH_KEY, 180, 140, 360));
   const [noteListWidth, setNoteListWidth] = useState(() => getStoredWidth(NOTELIST_WIDTH_KEY, 240, 180, 520));
+  const [assistantWidth, setAssistantWidth] = useState(() => getStoredWidth(ASSISTANT_WIDTH_KEY, 320, 260, 560));
+  const assistantVisible = useStore(state => state.assistantVisible);
   const [libraries, setLibraries] = useState<LibraryInfo[]>(() => getLibraries());
   const [activeLibraryId, setActiveLibrary] = useState(() => getActiveLibraryId());
   const [isCreateLibraryOpen, setIsCreateLibraryOpen] = useState(false);
@@ -185,24 +193,32 @@ export default function App() {
   }, [handleOpenLibraryPath]);
 
   const startColumnResize = (
-    column: 'sidebar' | 'noteList',
+    column: 'sidebar' | 'noteList' | 'assistant',
     e: ReactPointerEvent<HTMLDivElement>
   ) => {
     e.preventDefault();
 
-    const isSidebar = column === 'sidebar';
     const startX = e.clientX;
-    const startWidth = isSidebar ? sidebarWidth : noteListWidth;
-    const min = isSidebar ? 140 : 180;
-    const max = isSidebar ? 360 : 520;
-    const storageKey = isSidebar ? SIDEBAR_WIDTH_KEY : NOTELIST_WIDTH_KEY;
-    const setWidth = isSidebar ? setSidebarWidth : setNoteListWidth;
+    let startWidth: number;
+    let min: number;
+    let max: number;
+    let storageKey: string;
+    let setWidth: (width: number) => void;
+    // The assistant sits on the right, so dragging left (negative delta) grows it.
+    let dir = 1;
+    if (column === 'sidebar') {
+      startWidth = sidebarWidth; min = 140; max = 360; storageKey = SIDEBAR_WIDTH_KEY; setWidth = setSidebarWidth;
+    } else if (column === 'noteList') {
+      startWidth = noteListWidth; min = 180; max = 520; storageKey = NOTELIST_WIDTH_KEY; setWidth = setNoteListWidth;
+    } else {
+      startWidth = assistantWidth; min = 260; max = 560; storageKey = ASSISTANT_WIDTH_KEY; setWidth = setAssistantWidth; dir = -1;
+    }
     let latestWidth = startWidth;
 
     document.body.classList.add('resizing-column');
 
     const handlePointerMove = (event: PointerEvent) => {
-      latestWidth = clamp(startWidth + event.clientX - startX, min, max);
+      latestWidth = clamp(startWidth + dir * (event.clientX - startX), min, max);
       setWidth(latestWidth);
     };
 
@@ -765,6 +781,16 @@ export default function App() {
         e.preventDefault();
         useStore.getState().toggleSidebar();
       }
+      // Cmd+J: Toggle assistant
+      if (e.metaKey && e.key === 'j') {
+        e.preventDefault();
+        useStore.getState().toggleAssistant();
+      }
+      // Cmd+,: Open settings
+      if (e.metaKey && e.key === ',') {
+        e.preventDefault();
+        useStore.getState().setSettingsOpen(true);
+      }
       // Cmd+4: Editor only
       if (e.metaKey && e.key === '4') {
         e.preventDefault();
@@ -833,6 +859,7 @@ export default function App() {
   const appStyle = {
     '--sidebar-width': `${sidebarWidth}px`,
     '--notelist-width': `${noteListWidth}px`,
+    '--assistant-width': `${assistantWidth}px`,
   } as CSSProperties;
 
   return (
@@ -846,6 +873,7 @@ export default function App() {
             onCreateLibrary={handleCreateLibrary}
             onRenameLibrary={handleRenameLibrary}
             onOpenLibrary={handleOpenLibrary}
+            onOpenSettings={() => useStore.getState().setSettingsOpen(true)}
           />
           <div
             className="column-resizer"
@@ -874,7 +902,24 @@ export default function App() {
         </>
       )}
       <NoteEditor showFindBar={showFindBar} onCloseFindBar={() => setShowFindBar(false)} />
+      {assistantVisible && (
+        <>
+          <div
+            className="column-resizer"
+            role="separator"
+            aria-label="Resize assistant panel"
+            aria-orientation="vertical"
+            onPointerDown={e => startColumnResize('assistant', e)}
+          />
+          <div className="assistant-column" style={{ width: 'var(--assistant-width)', flexShrink: 0 }}>
+            <Suspense fallback={<div className="assistant-loading">Loading assistant…</div>}>
+              <AssistantPanel />
+            </Suspense>
+          </div>
+        </>
+      )}
       {showSearch && <SearchOverlay onClose={() => setShowSearch(false)} />}
+      <SettingsModal />
       {isCreateLibraryOpen && (
         <div className="library-dialog-overlay" onClick={closeCreateLibraryDialog}>
           <form className="library-dialog" onSubmit={handleCreateLibrarySubmit} onClick={e => e.stopPropagation()}>

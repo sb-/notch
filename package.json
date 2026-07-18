@@ -10,11 +10,14 @@
     "build:frontend": "bun build src/index.html --outdir dist --production",
     "preview": "bun run src/index.ts",
     "test": "bun test",
+    "assistant:e2e": "bun run scripts/assistant-e2e.ts",
     "tauri": "bunx tauri",
     "release": "bun run scripts/release.ts",
     "icons": "bun run scripts/generate-icons.ts && iconutil -c icns src-tauri/icons/icon.iconset -o src-tauri/icons/icon.icns"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.79.7",
+    "@earendil-works/pi-ai": "0.79.7",
     "@monaco-editor/react": "^4.6.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
