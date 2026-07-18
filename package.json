@@ -7,6 +7,7 @@
     "dev": "bunx tauri dev",
     "dev:frontend": "bun run --hot src/index.ts",
     "build": "bunx tauri build",
+    "build:local": "bunx tauri build --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'",
     "build:frontend": "bun build src/index.html --outdir dist --production",
     "preview": "bun run src/index.ts",
     "test": "bun test",
