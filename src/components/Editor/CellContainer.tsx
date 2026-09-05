@@ -39,8 +39,10 @@ export default function CellContainer({
     updateCell(noteId, cell.id, { diagramType });
   };
 
+  // Cells only invoke this after deciding they're empty (a text cell may still
+  // hold placeholder markup like <div><br></div>, so don't re-check data here).
   const handleBackspaceEmpty = () => {
-    if (canDelete && !cell.data.trim()) {
+    if (canDelete) {
       onDelete();
     }
   };

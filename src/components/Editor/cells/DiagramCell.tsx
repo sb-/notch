@@ -120,7 +120,7 @@ export default function DiagramCell({
     const textarea = textareaRef.current;
     if (!textarea) return;
 
-    if (e.key === 'Backspace' && !data.trim() && onBackspaceEmpty) {
+    if (e.key === 'Backspace' && data === '' && onBackspaceEmpty) {
       e.preventDefault();
       onBackspaceEmpty();
       return;

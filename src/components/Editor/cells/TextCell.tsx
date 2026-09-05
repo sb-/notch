@@ -95,7 +95,13 @@ export default function TextCell({
     const editor = editorRef.current;
     if (!editor) return;
 
-    const isEmpty = !editor.textContent?.trim() && !editor.querySelector('img');
+    // Blank lines are <br>/<div> markup with no textContent, so only treat the
+    // cell as empty when there's no line structure left for backspace to delete.
+    const isEmpty =
+      !editor.textContent?.trim() &&
+      !editor.querySelector('img') &&
+      editor.querySelectorAll('br').length <= 1 &&
+      editor.querySelectorAll('div, p').length <= 1;
 
     if (e.key === 'Backspace' && isEmpty && onBackspaceEmpty) {
       e.preventDefault();

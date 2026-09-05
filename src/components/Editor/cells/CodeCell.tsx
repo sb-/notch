@@ -72,7 +72,7 @@ export default function CodeCell({
       const key = e.browserEvent.key;
 
       // Backspace on empty
-      if (key === 'Backspace' && !dataRef.current.trim() && onBackspaceEmpty) {
+      if (key === 'Backspace' && dataRef.current === '' && onBackspaceEmpty) {
         e.browserEvent.preventDefault();
         onBackspaceEmpty();
         return;

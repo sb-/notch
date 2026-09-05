@@ -119,7 +119,7 @@ export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocuse
     const textarea = textareaRef.current;
     if (!textarea) return;
 
-    if (e.key === 'Backspace' && !data.trim() && onBackspaceEmpty) {
+    if (e.key === 'Backspace' && data === '' && onBackspaceEmpty) {
       e.preventDefault();
       onBackspaceEmpty();
       return;
