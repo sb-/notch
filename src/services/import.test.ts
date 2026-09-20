@@ -43,7 +43,7 @@ function installDbMock() {
 }
 installDbMock();
 
-const { importQuiverLibrary } = await import('./import');
+const { importQuiverLibrary, scanForDuplicates, summarizeImport } = await import('./import');
 
 // ---- Fixture helpers ---------------------------------------------------------
 const LIB = '/lib';
@@ -116,5 +116,52 @@ describe('importQuiverLibrary notebook nesting', () => {
       { name: 'A', parentId: undefined },
       { name: 'B', parentId: undefined },
     ]);
+  });
+
+  test('surfaces unreadable notebook metadata instead of claiming zero-result success', async () => {
+    dirs[LIB] = [dirEntry('Private.qvnotebook', 'dir')];
+    const result = await importQuiverLibrary(LIB);
+    expect(result.notebooks).toBe(0);
+    expect(result.notebooksFailed).toBe(1);
+    expect(result.errors[0].notePath).toBe('/lib/Private.qvnotebook/meta.json');
+    expect(summarizeImport(result)).toMatchObject({ title: 'Import Failed', kind: 'error' });
+    expect(summarizeImport(result).text).toContain('ENOENT');
+    expect(summarizeImport(result).text).not.toContain('Successfully');
+  });
+
+  test('preserves usable notebooks and reports a partial metadata failure', async () => {
+    dirs[LIB] = [notebook('Readable', 'ok'), dirEntry('Broken.qvnotebook', 'dir')];
+    const result = await importQuiverLibrary(LIB);
+    expect(result.notebooks).toBe(1);
+    expect(result.notebooksFailed).toBe(1);
+    expect(summarizeImport(result)).toMatchObject({ title: 'Import Completed with Errors', kind: 'warning' });
+  });
+
+  test('does not create or count a notebook whose contents cannot be listed', async () => {
+    dirs[LIB] = [notebook('Denied', 'denied')];
+    delete dirs['/lib/Denied.qvnotebook'];
+    const result = await importQuiverLibrary(LIB);
+    expect(result.notebooks).toBe(0);
+    expect(result.notebooksFailed).toBe(1);
+    expect(createNotebookCalls).toEqual([]);
+    expect(summarizeImport(result).kind).toBe('error');
+  });
+
+  test('reports invalid selections and unreadable root paths', async () => {
+    dirs[LIB] = [];
+    expect(summarizeImport(await importQuiverLibrary(LIB)).text).toContain('No .qvnotebook folders');
+    await expect(scanForDuplicates('/denied')).rejects.toThrow('ENOENT');
+    expect(summarizeImport(await importQuiverLibrary('/denied')).kind).toBe('error');
+  });
+
+  test('rejects malformed and cyclic notebook metadata without partial hierarchy creation', async () => {
+    dirs[LIB] = [notebook('Malformed', 'bad')];
+    files['/lib/Malformed.qvnotebook/meta.json'] = '{}';
+    expect((await importQuiverLibrary(LIB)).notebooksFailed).toBe(1);
+    dirs[LIB] = [notebook('A', 'a', ['b']), notebook('B', 'b', ['a'])];
+    const result = await importQuiverLibrary(LIB);
+    expect(result.notebooks).toBe(0);
+    expect(result.errors[0].error).toContain('cycle');
+    expect(createNotebookCalls).toEqual([]);
   });
 });

@@ -102,6 +102,7 @@ export default function AssistantSettingsForm({ onSaved }: { onSaved?: () => voi
         <div className="assistant-field-row">
           <select
             style={{ flex: 1 }}
+            aria-label="Detected models"
             value={models.includes(draft.model) ? draft.model : ''}
             onChange={e => pickModel(e.target.value)}
           >
@@ -112,6 +113,7 @@ export default function AssistantSettingsForm({ onSaved }: { onSaved?: () => voi
             type="button"
             className="assistant-icon-btn"
             title="Refresh models"
+            aria-label="Refresh models"
             onClick={() => void detect(draft.baseUrl, draft.apiKey)}
           >
             ↻

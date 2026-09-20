@@ -6,14 +6,14 @@ interface LatexCellProps {
   onChange: (data: string) => void;
   onFocus: () => void;
   isFocused?: boolean;
+  focusRequest?: number;
   onBackspaceEmpty?: () => void;
   onNavigatePrev?: () => void;
   onNavigateNext?: () => void;
 }
 
-export default function LatexCell({ data, onChange, onFocus, isFocused, onBackspaceEmpty, onNavigatePrev, onNavigateNext }: LatexCellProps) {
+export default function LatexCell({ data, onChange, onFocus, isFocused, focusRequest, onBackspaceEmpty, onNavigatePrev, onNavigateNext }: LatexCellProps) {
   const [isEditing, setIsEditing] = useState(!data);
-  const wasEditing = useRef(isEditing);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -41,19 +41,16 @@ export default function LatexCell({ data, onChange, onFocus, isFocused, onBacksp
   }, [data]);
 
   useEffect(() => {
-    if (isEditing && textareaRef.current) {
+    if (isEditing && isFocused && textareaRef.current) {
       textareaRef.current.focus();
       textareaRef.current.selectionStart = textareaRef.current.value.length;
     }
-  }, [isEditing]);
+  }, [isEditing, isFocused, focusRequest]);
 
-  // Auto-enter editing mode when cell becomes focused (for new cells)
+  // Keyboard navigation (including Return from the title) enters the source editor.
   useEffect(() => {
-    if (isFocused && !wasEditing.current && !isEditing) {
-      setIsEditing(true);
-    }
-    wasEditing.current = isEditing;
-  }, [isFocused, isEditing]);
+    if (isFocused) setIsEditing(true);
+  }, [isFocused, focusRequest]);
 
   const handleClick = () => {
     setIsEditing(true);
@@ -114,8 +111,10 @@ export default function LatexCell({ data, onChange, onFocus, isFocused, onBacksp
         <textarea
           ref={textareaRef}
           className="cell-editor"
+          aria-label="LaTeX cell"
           value={data}
           onChange={handleChange}
+          onFocus={onFocus}
           onBlur={handleBlur}
           onKeyDown={handleKeyDown}
           placeholder="Enter LaTeX, e.g., \sum_{i=1}^{n} x_i"

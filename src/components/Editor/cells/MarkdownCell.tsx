@@ -8,6 +8,7 @@ interface MarkdownCellProps {
   onChange: (data: string) => void;
   onFocus: () => void;
   isFocused?: boolean;
+  focusRequest?: number;
   onBackspaceEmpty?: () => void;
   onNavigatePrev?: () => void;
   onNavigateNext?: () => void;
@@ -34,7 +35,7 @@ function buildOverlayHtml(src: string): string {
   }
 }
 
-export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocused, onBackspaceEmpty, onNavigatePrev, onNavigateNext }: MarkdownCellProps) {
+export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocused, focusRequest, onBackspaceEmpty, onNavigatePrev, onNavigateNext }: MarkdownCellProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // The transparent textarea shows nothing itself — the visible text is the <pre>
@@ -68,7 +69,7 @@ export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocuse
     if (isFocused && ta && document.activeElement !== ta) {
       ta.focus();
     }
-  }, [isFocused]);
+  }, [isFocused, focusRequest]);
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     onChange(e.target.value);
@@ -165,6 +166,7 @@ export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocuse
       <textarea
         ref={textareaRef}
         className="markdown-editor-input"
+        aria-label="Markdown cell"
         value={data}
         spellCheck={false}
         onChange={handleChange}

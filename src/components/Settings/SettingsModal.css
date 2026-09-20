@@ -38,7 +38,10 @@
 }
 
 .settings-modal-body {
+  min-height: 0;
+  min-width: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 4px 4px 12px;
 }
 

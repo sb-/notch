@@ -190,12 +190,16 @@ export default function AssistantPanel() {
     if (el) pinnedToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
   };
 
-  // Auto-grow the input from a single line up to a max as the user types.
+  // Auto-grow the input from a single line up to a max as the user types; only
+  // show a scrollbar once it hits the max (otherwise overflow:hidden while growing).
   useLayoutEffect(() => {
     const el = inputRef.current;
     if (!el) return;
+    const MAX = 160;
     el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+    const next = Math.min(el.scrollHeight, MAX);
+    el.style.height = `${next}px`;
+    el.style.overflowY = el.scrollHeight > MAX ? 'auto' : 'hidden';
   }, [input]);
 
   const send = useCallback(async () => {
@@ -386,7 +390,7 @@ export default function AssistantPanel() {
             <textarea
               ref={inputRef}
               className="assistant-input"
-              placeholder="Ask the assistant…  (@ to reference)"
+              placeholder="Ask the assistant…"
               value={input}
               onChange={handleInputChange}
               onKeyDown={onKeyDown}

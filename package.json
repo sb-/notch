@@ -7,7 +7,7 @@
     "dev": "bunx tauri dev",
     "dev:frontend": "bun run --hot scripts/dev-frontend.ts",
     "build": "bunx tauri build",
-    "build:frontend": "bun build src/index.html --outdir dist --production --splitting",
+    "build:frontend": "bun run scripts/build-frontend.ts",
     "preview": "bun run src/index.ts",
     "test": "bun test",
     "assistant:e2e": "bun run scripts/assistant-e2e.ts",

@@ -13,6 +13,9 @@ use tauri::{
     Emitter, Manager, State,
 };
 
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_fs::FsExt;
+
 const LIBRARY_EXTENSION: &str = "notch";
 const LIBRARY_MANIFEST: &str = "manifest.json";
 const LIBRARY_DATABASE: &str = "notch.db";
@@ -39,6 +42,27 @@ struct LibraryInfo {
     created_at: i64,
 }
 
+// A macOS package looks like a file in the chooser, but import needs its
+// descendants. Grant only the package the user selected, never a supplied path.
+#[tauri::command]
+async fn select_quiver_library(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let picker_app = app.clone();
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        picker_app.dialog().file()
+            .set_title("Select Quiver Library (.qvlibrary)")
+            .add_filter("Quiver Library", &["qvlibrary"])
+            .blocking_pick_file()
+    }).await.map_err(|err| err.to_string())?;
+    let Some(selected) = selected else { return Ok(None); };
+    let path = selected.into_path().map_err(|err| err.to_string())?;
+    let path = fs::canonicalize(path).map_err(|err| err.to_string())?;
+    if !path.is_dir() || path.extension().and_then(|s| s.to_str()) != Some("qvlibrary") {
+        return Err("Select a .qvlibrary package containing Quiver notebooks.".into());
+    }
+    app.fs_scope().allow_directory(&path, true).map_err(|err| err.to_string())?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
 fn main() {
     let mut builder = tauri::Builder::default();
 
@@ -58,9 +82,11 @@ fn main() {
         .plugin(tauri_plugin_sql::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
+            select_quiver_library,
             create_library_package,
             open_library_package,
             rename_library_package,
+            set_note_menu_state,
             take_pending_library_path
         ])
         .setup(|app| {
@@ -84,11 +110,23 @@ fn main() {
                 "new_notebook" => {
                     let _ = window.eval("window.__NOTCH__.newNotebook()");
                 }
+                "duplicate_note" => {
+                    let _ = window.eval("window.__NOTCH__.duplicateNote()");
+                }
+                "trash_note" => {
+                    let _ = window.eval("window.__NOTCH__.trashNote()");
+                }
+                "restore_note" => {
+                    let _ = window.eval("window.__NOTCH__.restoreNote()");
+                }
                 "new_library" => {
                     let _ = window.eval("window.__NOTCH__.newLibrary()");
                 }
                 "open_library" => {
                     let _ = window.eval("window.__NOTCH__.openLibrary()");
+                }
+                "settings" => {
+                    let _ = window.eval("window.__NOTCH__.openSettings()");
                 }
                 "import" => {
                     let _ = window.eval("window.__NOTCH__.importLibrary()");
@@ -98,6 +136,9 @@ fn main() {
                 }
                 "export_library" => {
                     let _ = window.eval("window.__NOTCH__.exportLibrary()");
+                }
+                "restore_library" => {
+                    let _ = window.eval("window.__NOTCH__.restoreLibrary()");
                 }
                 "search_all_notes" => {
                     let _ = window.eval("window.__NOTCH__.searchAllNotes()");
@@ -141,6 +182,22 @@ fn main() {
             handle_opened_urls(app_handle, urls);
         }
     });
+}
+
+#[tauri::command]
+fn set_note_menu_state(app: tauri::AppHandle, has_note: bool, is_trashed: bool) -> Result<(), String> {
+    if let Some(menu) = app.menu().and_then(|menu| menu.get("note_menu")).and_then(|item| item.as_submenu().cloned()) {
+        for (id, enabled) in [
+            ("duplicate_note", has_note && !is_trashed),
+            ("trash_note", has_note && !is_trashed),
+            ("restore_note", has_note && is_trashed),
+        ] {
+            if let Some(item) = menu.get(id).and_then(|item| item.as_menuitem().cloned()) {
+                item.set_enabled(enabled).map_err(|err| err.to_string())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -429,6 +486,15 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
                 true,
                 None::<&str>,
             )?,
+            &MenuItem::with_id(
+                handle,
+                "restore_library",
+                "Restore Library Backup...",
+                true,
+                None::<&str>,
+            )?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "settings", "Settings...", true, Some("CmdOrCtrl+,"))?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::close_window(handle, None)?,
         ],
@@ -462,6 +528,19 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
                 true,
                 Some("CmdOrCtrl+Shift+F"),
             )?,
+        ],
+    )?;
+
+    let note_menu = Submenu::with_id_and_items(
+        handle,
+        "note_menu",
+        "Note",
+        true,
+        &[
+            &MenuItem::with_id(handle, "duplicate_note", "Duplicate Note", false, None::<&str>)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "trash_note", "Move Note to Trash", false, None::<&str>)?,
+            &MenuItem::with_id(handle, "restore_note", "Restore Note", false, None::<&str>)?,
         ],
     )?;
 
@@ -570,6 +649,7 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
             &app_menu,
             &file_menu,
             &edit_menu,
+            &note_menu,
             &view_menu,
             &window_menu,
             &help_menu,

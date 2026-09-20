@@ -12,6 +12,7 @@ interface CellContainerProps {
   noteId: string;
   cell: Cell;
   isFocused: boolean;
+  focusRequest?: number;
   onFocus: () => void;
   onDelete: () => void;
   canDelete: boolean;
@@ -23,6 +24,7 @@ export default function CellContainer({
   noteId,
   cell,
   isFocused,
+  focusRequest,
   onFocus,
   onDelete,
   canDelete,
@@ -53,6 +55,7 @@ export default function CellContainer({
       onChange: handleDataChange,
       onFocus,
       isFocused,
+      focusRequest,
       onBackspaceEmpty: handleBackspaceEmpty,
       onNavigatePrev,
       onNavigateNext,
@@ -87,6 +90,7 @@ export default function CellContainer({
 
   return (
     <div
+      data-cell-id={cell.id}
       className={`cell cell-${cell.type} ${isFocused ? 'focused' : ''}`}
       onClick={onFocus}
     >

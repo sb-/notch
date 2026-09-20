@@ -32,9 +32,38 @@ function normalizeStyleValue(value: string): string | null {
   return normalized;
 }
 
+// Clipboard producers (including WebKit) often serialize the default foreground
+// as black/white. Let these neutral endpoints inherit Notch's theme; keep explicit
+// accent colors. This also makes already-saved clipboard content readable.
+export function normalizeForegroundColor(value: string): string | null {
+  const color = value.trim().toLowerCase();
+  if (/^(?:black|white|#000|#000000|#000f|#000000ff|#fff|#ffffff|#ffff|#ffffffff)$/.test(color)) return null;
+  const rgb = color.match(/^rgba?\(([^)]+)\)$/);
+  if (rgb) {
+    const parts = rgb[1].split(/[,\s/]+/).filter(Boolean);
+    const opaque = parts.length === 3 || (parts.length === 4 && (parts[3] === '1' || parts[3] === '100%'));
+    const endpoint = (part: string) => part.endsWith('%') ? Number.parseFloat(part) * 2.55 : Number(part);
+    const channels = parts.slice(0, 3).map(endpoint);
+    if (opaque && (channels.every(channel => channel === 0) || channels.every(channel => Math.abs(channel - 255) < 0.001))) return null;
+  }
+  if (/^hsla?\([\d.]+(?:deg)?[,\s]+0%[,\s]+(?:0|100)%(?:[,\s/]+(?:1|100%))?\)$/.test(color)) return null;
+  return value;
+}
+
+/** Remove WebKit's default foreground spans without rebuilding the editable DOM. */
+export function normalizeRichTextColors(editor: HTMLElement): void {
+  for (const element of editor.querySelectorAll<HTMLElement>('[style]')) {
+    const color = element.style.color;
+    if (color && normalizeForegroundColor(color) === null) {
+      element.style.removeProperty('color');
+      if (!element.getAttribute('style')?.trim()) element.removeAttribute('style');
+    }
+  }
+}
+
 function sanitizeColorStyle(value: string): string | null {
   const normalized = normalizeStyleValue(value);
-  if (!normalized) return null;
+  if (!normalized || normalizeForegroundColor(normalized) === null) return null;
 
   if (/^#[\da-f]{3,8}$/i.test(normalized)) return normalized;
   if (/^(?:rgb|hsl)a?\([\d%.,\s/+.-]+\)$/i.test(normalized)) return normalized;

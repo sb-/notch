@@ -1,0 +1,6 @@
+.search-result-preview mark {
+  background: rgba(255, 208, 0, 0.24);
+  color: inherit;
+  font-weight: 600;
+  border-radius: 2px;
+}

@@ -4,6 +4,13 @@ Bun.serve({
   port: 1420,
   routes: {
     '/': index,
+    '/monaco/*': request => {
+      const path = new URL(request.url).pathname.slice('/monaco/'.length);
+      if (path.split('/').some(part => part === '..') || !path.startsWith('vs/')) {
+        return new Response('Not found', { status: 404 });
+      }
+      return new Response(Bun.file(`node_modules/monaco-editor/min/${path}`));
+    },
   },
   development: {
     // HMR is disabled: the optional assistant bundles LLM provider SDKs

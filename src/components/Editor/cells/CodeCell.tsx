@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import Editor from '@monaco-editor/react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { loader } from '@monaco-editor/react';
+import type * as Monaco from 'monaco-editor';
+import './monaco';
 import { toMonacoLanguage } from '../codeLanguages';
 
 interface CodeCellProps {
@@ -8,157 +10,226 @@ interface CodeCellProps {
   onChange: (data: string) => void;
   onFocus: () => void;
   isFocused?: boolean;
+  focusRequest?: number;
   onBackspaceEmpty?: () => void;
   onNavigatePrev?: () => void;
   onNavigateNext?: () => void;
 }
 
-const EDITOR_FONT_SIZE = 13;
 const EDITOR_LINE_HEIGHT = 21;
 const HORIZONTAL_SCROLLBAR_RESERVE = 8;
-const MIN_EDITOR_HEIGHT = EDITOR_LINE_HEIGHT;
+const MIN_EDITOR_HEIGHT = EDITOR_LINE_HEIGHT + HORIZONTAL_SCROLLBAR_RESERVE;
+
+const EDITOR_OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
+  ariaLabel: 'Code cell',
+  theme: 'vs-dark',
+  minimap: { enabled: false },
+  lineNumbers: 'on',
+  glyphMargin: false,
+  folding: false,
+  lineDecorationsWidth: 12,
+  lineNumbersMinChars: 3,
+  scrollBeyondLastLine: false,
+  fontSize: 13,
+  lineHeight: EDITOR_LINE_HEIGHT,
+  fontFamily: "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
+  tabSize: 2,
+  automaticLayout: false,
+  wordWrap: 'off',
+  renderLineHighlight: 'none',
+  scrollbar: {
+    vertical: 'hidden',
+    horizontal: 'auto',
+    horizontalScrollbarSize: HORIZONTAL_SCROLLBAR_RESERVE,
+    handleMouseWheel: false,
+  },
+  padding: { top: 0, bottom: 0 },
+  overviewRulerBorder: false,
+  overviewRulerLanes: 0,
+  hideCursorInOverviewRuler: true,
+  quickSuggestions: false,
+  suggestOnTriggerCharacters: false,
+  parameterHints: { enabled: false },
+  wordBasedSuggestions: 'off',
+  snippetSuggestions: 'none',
+  inlineSuggest: { enabled: false },
+  occurrencesHighlight: 'off',
+  selectionHighlight: false,
+  wordSeparators: '',
+  cursorBlinking: 'solid',
+  cursorStyle: 'line',
+  selectOnLineNumbers: false,
+};
 
 export default function CodeCell({
   data,
   language,
   onChange,
   onFocus,
+  isFocused,
+  focusRequest,
   onBackspaceEmpty,
   onNavigatePrev,
   onNavigateNext,
 }: CodeCellProps) {
   const [editorHeight, setEditorHeight] = useState(MIN_EDITOR_HEIGHT);
-  const editorRef = useRef<{
-    getContentHeight: () => number;
-    layout: (dimension?: { width: number; height: number }) => void;
-  } | null>(null);
-  const dataRef = useRef(data);
+  const [editorReady, setEditorReady] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  const monacoRef = useRef<typeof Monaco | null>(null);
+  const applyingExternalValue = useRef(false);
+  const layingOut = useRef(false);
+  // Long-lived Monaco listeners must read the current note and cell callbacks.
+  const latest = useRef({ data, language, onChange, isFocused, onFocus, onBackspaceEmpty, onNavigatePrev, onNavigateNext });
+  latest.current = { data, language, onChange, isFocused, onFocus, onBackspaceEmpty, onNavigatePrev, onNavigateNext };
 
-  useEffect(() => {
-    dataRef.current = data;
-  }, [data]);
-
-  // No manual layout() on height change: `automaticLayout` already observes the
-  // container (and is needed for width changes when the editor column resizes),
-  // so it re-lays-out when the height style updates. Calling it here too caused a
-  // redundant second layout pass on every line add/remove.
-
-  const syncEditorHeight = useCallback((editor = editorRef.current) => {
-    if (!editor) return;
-
-    const height = Math.max(
-      MIN_EDITOR_HEIGHT,
-      Math.ceil(editor.getContentHeight()) + HORIZONTAL_SCROLLBAR_RESERVE
-    );
+  const syncEditorHeight = useCallback((editor: Monaco.editor.IStandaloneCodeEditor) => {
+    const height = Math.max(MIN_EDITOR_HEIGHT, Math.ceil(editor.getContentHeight()) + HORIZONTAL_SCROLLBAR_RESERVE);
     setEditorHeight(current => current === height ? current : height);
   }, []);
 
-  const handleEditorMount = useCallback((editor: unknown) => {
-    onFocus();
-    // Type the editor for Monaco
-    const monacoEditor = editor as {
-      onKeyDown: (handler: (e: { browserEvent: KeyboardEvent }) => void) => void;
-      onDidContentSizeChange: (handler: () => void) => { dispose: () => void };
-      getContentHeight: () => number;
-      getPosition: () => { lineNumber: number; column: number } | null;
-      layout: (dimension?: { width: number; height: number }) => void;
-      getModel: () => { getLineCount: () => number; getLineMaxColumn: (line: number) => number } | null;
+  const layoutEditor = useCallback(() => {
+    const editor = editorRef.current;
+    const container = containerRef.current;
+    if (!editor || !container || layingOut.current) return;
+    const { clientWidth: width, clientHeight: height } = container;
+    if (width <= 0 || height <= 0) return;
+    layingOut.current = true;
+    try {
+      // WKWebView may suspend animation frames while the native window is in
+      // the background. Monaco's public render(true) renders synchronously, so
+      // mounting and resizing never depend on the next animation frame arriving.
+      editor.layout({ width, height }, true);
+      editor.render(true);
+      syncEditorHeight(editor);
+    } finally {
+      layingOut.current = false;
+    }
+  }, [syncEditorHeight]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    let disposed = false;
+    let model: Monaco.editor.ITextModel | null = null;
+    const subscriptions: Monaco.IDisposable[] = [];
+
+    const createWhenVisible = () => {
+      const monaco = monacoRef.current;
+      if (disposed || !monaco || editorRef.current) return;
+      const { clientWidth: width, clientHeight: height } = container;
+      if (width <= 0 || height <= 0) return;
+
+      model = monaco.editor.createModel(latest.current.data, toMonacoLanguage(latest.current.language));
+      // Create directly in the visible, measured host. The React wrapper creates
+      // Monaco inside display:none, which WKWebView can leave at its 5×5 minimum
+      // until a native window resize, even when the outer container is correct.
+      const editor = monaco.editor.create(container, { ...EDITOR_OPTIONS, model, dimension: { width, height } });
+      editorRef.current = editor;
+      subscriptions.push(
+        editor.onDidContentSizeChange(() => syncEditorHeight(editor)),
+        editor.onDidFocusEditorText(() => latest.current.onFocus()),
+        editor.onDidChangeModelContent(() => {
+          if (!applyingExternalValue.current) latest.current.onChange(editor.getValue());
+        }),
+        editor.onKeyDown(event => {
+          const { onBackspaceEmpty, onNavigatePrev, onNavigateNext } = latest.current;
+          const key = event.browserEvent.key;
+          if (key === 'Backspace' && editor.getValue() === '' && onBackspaceEmpty) {
+            event.preventDefault();
+            onBackspaceEmpty();
+            return;
+          }
+          if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+          const position = editor.getPosition();
+          const currentModel = editor.getModel();
+          if (!position || !currentModel) return;
+          if (key === 'ArrowUp' && position.lineNumber === 1 && onNavigatePrev) {
+            event.preventDefault();
+            onNavigatePrev();
+          } else if (key === 'ArrowDown' && position.lineNumber === currentModel.getLineCount() && onNavigateNext) {
+            event.preventDefault();
+            onNavigateNext();
+          }
+        }),
+      );
+      syncEditorHeight(editor);
+      setEditorReady(true);
+      layoutEditor();
+      if (latest.current.isFocused) editor.focus();
     };
-    editorRef.current = monacoEditor;
-    syncEditorHeight(monacoEditor);
-    monacoEditor.onDidContentSizeChange(() => syncEditorHeight(monacoEditor));
 
-    monacoEditor.onKeyDown((e) => {
-      const key = e.browserEvent.key;
-
-      // Backspace on empty
-      if (key === 'Backspace' && dataRef.current === '' && onBackspaceEmpty) {
-        e.browserEvent.preventDefault();
-        onBackspaceEmpty();
-        return;
-      }
-
-      // Arrow key navigation
-      const position = monacoEditor.getPosition();
-      const model = monacoEditor.getModel();
-      if (!position || !model) return;
-
-      if (key === 'ArrowUp' && onNavigatePrev) {
-        // On line 1 - navigate to previous cell
-        if (position.lineNumber === 1) {
-          e.browserEvent.preventDefault();
-          onNavigatePrev();
-        }
-      } else if (key === 'ArrowDown' && onNavigateNext) {
-        // On last line - navigate to next cell
-        const lastLine = model.getLineCount();
-        if (position.lineNumber === lastLine) {
-          e.browserEvent.preventDefault();
-          onNavigateNext();
-        }
-      }
+    const observer = new ResizeObserver(() => {
+      if (editorRef.current) layoutEditor();
+      else createWhenVisible();
     });
-  }, [onFocus, onBackspaceEmpty, onNavigatePrev, onNavigateNext, syncEditorHeight]);
+    observer.observe(container);
+    const initialization = loader.init();
+    void initialization.then(monaco => {
+      if (disposed) return;
+      monacoRef.current = monaco;
+      createWhenVisible();
+    }).catch(error => {
+      if (disposed || error?.type === 'cancelation') return;
+      console.error('Unable to initialize code editor', error);
+      setLoadError(true);
+    });
+    void document.fonts.ready.then(() => {
+      if (!disposed) layoutEditor();
+    });
+    return () => {
+      disposed = true;
+      observer.disconnect();
+      initialization.cancel();
+      subscriptions.forEach(subscription => subscription.dispose());
+      editorRef.current?.dispose();
+      model?.dispose();
+      editorRef.current = null;
+      monacoRef.current = null;
+    };
+  }, [layoutEditor, syncEditorHeight]);
 
-  const handleEditorChange = useCallback(
-    (value: string | undefined) => {
-      onChange(value ?? '');
-    },
-    [onChange]
-  );
+  useLayoutEffect(() => {
+    if (editorReady) layoutEditor();
+  }, [editorReady, editorHeight, layoutEditor]);
 
-  const monacoLanguage = toMonacoLanguage(language);
+  useLayoutEffect(() => {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    if (!editor || !model) return;
+    if (data !== editor.getValue()) {
+      applyingExternalValue.current = true;
+      try {
+        editor.executeEdits('notch', [{ range: model.getFullModelRange(), text: data, forceMoveMarkers: true }]);
+        editor.pushUndoStop();
+      } finally {
+        applyingExternalValue.current = false;
+      }
+    }
+    layoutEditor();
+  }, [data, editorReady, layoutEditor]);
+
+  useEffect(() => {
+    const model = editorRef.current?.getModel();
+    if (model) {
+      monacoRef.current?.editor.setModelLanguage(model, toMonacoLanguage(language));
+      editorRef.current?.render(true);
+    }
+  }, [language, editorReady]);
+
+  useEffect(() => {
+    if (isFocused) editorRef.current?.focus();
+  }, [isFocused, focusRequest, editorReady]);
 
   return (
-    <div className="code-cell-wrapper">
-      <div className="monaco-container" style={{ height: `${editorHeight}px` }}>
-        <Editor
-          height="100%"
-          language={monacoLanguage}
-          value={data}
-          onChange={handleEditorChange}
-          onMount={handleEditorMount}
-          theme="vs-dark"
-          options={{
-            minimap: { enabled: false },
-            lineNumbers: 'on',
-            glyphMargin: false,
-            folding: false,
-            lineDecorationsWidth: 12,
-            lineNumbersMinChars: 3,
-            scrollBeyondLastLine: false,
-            fontSize: EDITOR_FONT_SIZE,
-            lineHeight: EDITOR_LINE_HEIGHT,
-            fontFamily: "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
-            tabSize: 2,
-            automaticLayout: true,
-            wordWrap: 'off',
-            renderLineHighlight: 'none',
-            scrollbar: {
-              vertical: 'hidden',
-              horizontal: 'auto',
-              horizontalScrollbarSize: 8,
-              handleMouseWheel: false,
-            },
-            padding: { top: 0, bottom: 0 },
-            overviewRulerBorder: false,
-            overviewRulerLanes: 0,
-            hideCursorInOverviewRuler: true,
-            quickSuggestions: false,
-            suggestOnTriggerCharacters: false,
-            parameterHints: { enabled: false },
-            wordBasedSuggestions: 'off',
-            snippetSuggestions: 'none',
-            inlineSuggest: { enabled: false },
-            occurrencesHighlight: 'off',
-            selectionHighlight: false,
-            wordSeparators: '',
-            cursorBlinking: 'solid',
-            cursorStyle: 'line',
-            selectOnLineNumbers: false,
-          }}
-        />
-      </div>
+    <div className="code-cell-wrapper" style={{ position: 'relative' }}>
+      <div ref={containerRef} className="monaco-container" style={{ height: editorHeight + 'px' }} />
+      {!editorReady && (
+        <div className="cell-loading" role={loadError ? 'alert' : 'status'} style={{ position: 'absolute', inset: 0 }}>
+          {loadError ? 'Unable to load code editor.' : 'Loading code editor…'}
+        </div>
+      )}
     </div>
   );
 }

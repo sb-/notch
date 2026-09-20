@@ -245,7 +245,7 @@ export default function Sidebar({
   onOpenLibrary,
   onOpenSettings,
 }: SidebarProps = {}) {
-  const [activeTab, setActiveTab] = useState<'notebooks' | 'tags'>('notebooks');
+  const [activeTab, setActiveTab] = useState<'notebooks' | 'tags'>(() => useStore.getState().selectedTagId ? 'tags' : 'notebooks');
   const [newItemName, setNewItemName] = useState('');
   const [showNewInput, setShowNewInput] = useState(false);
   const [filterText, setFilterText] = useState('');
@@ -256,6 +256,7 @@ export default function Sidebar({
   const [showMoveSubmenu, setShowMoveSubmenu] = useState(false);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const draggedRef = useRef<string | null>(null);
+  const librarySwitcherRef = useRef<HTMLDivElement>(null);
 
   const notebooks = useNotebooks();
   const tags = useTags();
@@ -298,7 +299,8 @@ export default function Sidebar({
   const handleCreateItem = async () => {
     if (newItemName.trim()) {
       if (activeTab === 'notebooks') {
-        await createNotebook(newItemName.trim(), newNotebookParentId ?? undefined);
+        const notebook = await createNotebook(newItemName.trim(), newNotebookParentId ?? undefined);
+        await selectNotebook(notebook.id);
         if (newNotebookParentId) {
           setExpandedNotebooks(prev => new Set([...prev, newNotebookParentId]));
         }
@@ -313,7 +315,11 @@ export default function Sidebar({
 
   const handleContextMenu = (e: React.MouseEvent, notebookId: string) => {
     e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY, notebookId });
+    setContextMenu({
+      x: Math.max(8, Math.min(e.clientX, window.innerWidth - 200)),
+      y: Math.max(8, Math.min(e.clientY, window.innerHeight - 176)),
+      notebookId,
+    });
   };
 
   const handleNewNoteInNotebook = async () => {
@@ -324,7 +330,7 @@ export default function Sidebar({
   };
 
   const handleDeleteNotebook = async () => {
-    if (contextMenu && confirm('Delete this notebook and all its notes?')) {
+    if (contextMenu && confirm('Remove this notebook and its subnotebooks? Their notes will move to Trash and can be restored to Inbox.')) {
       await deleteNotebook(contextMenu.notebookId);
       setContextMenu(null);
     }
@@ -442,14 +448,50 @@ export default function Sidebar({
     }
   }, [contextMenu]);
 
+  useEffect(() => {
+    if (selectedTagId) setActiveTab('tags');
+  }, [selectedTagId]);
+
+  useEffect(() => {
+    setContextMenu(null);
+    setShowLibraryMenu(false);
+    setShowMoveSubmenu(false);
+  }, [selectedNotebookId, selectedCollection, selectedTagId, activeLibraryId]);
+
+  useEffect(() => {
+    const dismiss = () => {
+      setContextMenu(null);
+      setShowLibraryMenu(false);
+      setShowMoveSubmenu(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') dismiss();
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (!librarySwitcherRef.current?.contains(event.target as Node)) setShowLibraryMenu(false);
+    };
+    window.addEventListener('notch-dismiss-menus', dismiss);
+    window.addEventListener('blur', dismiss);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => {
+      window.removeEventListener('notch-dismiss-menus', dismiss);
+      window.removeEventListener('blur', dismiss);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('pointerdown', onPointerDown);
+    };
+  }, []);
+
   return (
     <div className="sidebar">
       {activeLibrary && (
-        <div className="library-switcher">
+        <div className="library-switcher" ref={librarySwitcherRef}>
           <button
             className="library-switcher-button"
             onClick={() => setShowLibraryMenu(show => !show)}
             title="Switch Library"
+            aria-expanded={showLibraryMenu}
+            aria-haspopup="menu"
           >
             <span className="library-switcher-name">{activeLibrary.name}</span>
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -698,7 +740,7 @@ export default function Sidebar({
             Move to...
             <span className="context-menu-arrow">›</span>
             {showMoveSubmenu && (
-              <div className="context-submenu">
+              <div className="context-submenu" style={{ maxHeight: `calc(100vh - ${contextMenu.y + 48}px)`, overflowY: 'auto' }}>
                 <div
                   className="context-menu-item"
                   onClick={() => handleMoveNotebook(null)}

@@ -132,6 +132,7 @@ export interface AppActions {
   updateNote: (id: string, updates: Partial<Note>) => Promise<void>;
   deleteNote: (id: string, permanent?: boolean) => Promise<void>;
   restoreNote: (id: string) => Promise<void>;
+  duplicateNote: (id: string) => Promise<Note>;
   toggleFavorite: (id: string) => Promise<void>;
 
   // Cell actions

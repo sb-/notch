@@ -14,11 +14,14 @@ import type {
 } from '../types';
 import * as db from '../services/database';
 import { getNotebookSubtreeIds } from '../utils/notebooks';
+import { validSelectedNote, visibleNotes } from '../utils/noteSelection';
+import { preferencesChanged, readPreferences, savePreferences } from './preferences';
 
 type Store = AppState & AppActions;
 
 const conversionUndoStack: { noteId: string; cell: Cell }[] = [];
 const noteBodyLoadPromises = new Map<string, Promise<void>>();
+let currentLibraryPath: string | null = null;
 
 export const useStore = create<Store>((set, get) => ({
   // Initial UI state
@@ -71,11 +74,8 @@ export const useStore = create<Store>((set, get) => ({
 
   selectNotebook: async (id: string | null) => {
     const state = get();
-    const notebookIds = id ? getNotebookSubtreeIds(state.notebooks, id) : new Set<string>();
-    const notesInNotebook = id
-      ? state.notes.filter(n => notebookIds.has(n.notebookId) && !n.isTrashed)
-      : [];
-    const selectedNoteId = notesInNotebook[0]?.id ?? null;
+    const selectedNoteId = id ? visibleNotes({ ...state, selectedNotebookId: id,
+      selectedCollection: null, selectedTagId: null })[0]?.id ?? null : null;
     set({
       selectedNotebookId: id,
       selectedCollection: null,
@@ -96,37 +96,8 @@ export const useStore = create<Store>((set, get) => ({
 
   selectCollection: async (collection: SpecialCollection | null) => {
     const state = get();
-    const allNotes = state.notes;
-    const notebooks = state.notebooks;
-
-    let filteredNotes: Note[] = [];
-    if (collection) {
-      switch (collection) {
-        case 'all':
-          filteredNotes = allNotes.filter(n => !n.isTrashed);
-          break;
-        case 'favorites':
-          filteredNotes = allNotes.filter(n => n.isFavorite && !n.isTrashed);
-          break;
-        case 'recents':
-          filteredNotes = allNotes
-            .filter(n => !n.isTrashed)
-            .sort((a, b) => b.updatedAt - a.updatedAt)
-            .slice(0, 50);
-          break;
-        case 'trash':
-          filteredNotes = allNotes.filter(n => n.isTrashed);
-          break;
-        case 'inbox':
-          const inbox = notebooks.find(nb => nb.name === 'Inbox');
-          if (inbox) {
-            filteredNotes = allNotes.filter(n => n.notebookId === inbox.id && !n.isTrashed);
-          }
-          break;
-      }
-    }
-
-    const selectedNoteId = filteredNotes[0]?.id ?? null;
+    const selectedNoteId = collection ? visibleNotes({ ...state, selectedCollection: collection,
+      selectedNotebookId: null, selectedTagId: null })[0]?.id ?? null : null;
     set({
       selectedCollection: collection,
       selectedNotebookId: null,
@@ -140,15 +111,8 @@ export const useStore = create<Store>((set, get) => ({
 
   selectTag: async (id: string | null) => {
     const state = get();
-    const allNotes = state.notes;
-    const tag = state.tags.find(t => t.id === id);
-
-    let filteredNotes: Note[] = [];
-    if (tag) {
-      filteredNotes = allNotes.filter(n => n.tags.includes(tag.name) && !n.isTrashed);
-    }
-
-    const selectedNoteId = filteredNotes[0]?.id ?? null;
+    const selectedNoteId = id ? visibleNotes({ ...state, selectedTagId: id,
+      selectedNotebookId: null, selectedCollection: null })[0]?.id ?? null : null;
     set({
       selectedTagId: id,
       selectedNotebookId: null,
@@ -178,21 +142,35 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   deleteNotebook: async (id: string) => {
+    const removedIds = getNotebookSubtreeIds(get().notebooks, id);
     await db.deleteNotebook(id);
-    set(state => ({
-      notebooks: state.notebooks.filter(n => n.id !== id),
-      selectedNotebookId: state.selectedNotebookId === id ? null : state.selectedNotebookId,
-    }));
+    const notebooks = await db.getAllNotebooks();
+    const inbox = notebooks.find(notebook => notebook.name === 'Inbox' && !notebook.parentId)!;
+    const state = get();
+    const next = {
+      ...state, notebooks,
+      notes: state.notes.map(note => removedIds.has(note.notebookId)
+        ? { ...note, notebookId: inbox.id, isTrashed: true } : note),
+      selectedNotebookId: state.selectedNotebookId && removedIds.has(state.selectedNotebookId) ? null : state.selectedNotebookId,
+    };
+    if (state.selectedNotebookId && removedIds.has(state.selectedNotebookId)) next.selectedCollection = 'trash';
+    const selectedNoteId = validSelectedNote(next);
+    set({ notebooks, notes: next.notes, selectedNotebookId: next.selectedNotebookId, selectedCollection: next.selectedCollection,
+      selectedNoteId, focusedCellId: null, searchResults: [] });
+    if (selectedNoteId) void get().loadNoteBody(selectedNoteId);
   },
 
   // ==================== NOTE ACTIONS ====================
 
   createNote: async (notebookId: string, title?: string) => {
     const note = await db.createNote(notebookId, title);
-    set(state => ({
-      notes: [note, ...state.notes],
-      selectedNoteId: note.id,
-    }));
+    const state = get();
+    const next = { ...state, notes: [note, ...state.notes], selectedNoteId: note.id };
+    // A new note must be visible even when created from Trash or a tag filter.
+    const destination = validSelectedNote(next) === note.id ? {} : {
+      selectedNotebookId: notebookId, selectedCollection: null, selectedTagId: null,
+    };
+    set({ notes: next.notes, selectedNoteId: note.id, focusedCellId: null, ...destination });
     return note;
   },
 
@@ -207,34 +185,28 @@ export const useStore = create<Store>((set, get) => ({
 
   deleteNote: async (id: string, permanent = false) => {
     await db.deleteNote(id, permanent);
-    if (permanent) {
-      const state = get();
-      const nextSelectedNoteId = state.selectedNoteId === id
-        ? state.notes.find(n => n.id !== id)?.id ?? null
-        : state.selectedNoteId;
-      set({
-        notes: state.notes.filter(n => n.id !== id),
-        selectedNoteId: nextSelectedNoteId,
-      });
-      if (nextSelectedNoteId) {
-        void get().loadNoteBody(nextSelectedNoteId);
-      }
-    } else {
-      set(state => ({
-        notes: state.notes.map(n =>
-          n.id === id ? { ...n, isTrashed: true } : n
-        ),
-      }));
-    }
+    const state = get();
+    const notes = permanent ? state.notes.filter(note => note.id !== id)
+      : state.notes.map(note => note.id === id ? { ...note, isTrashed: true } : note);
+    const selectedNoteId = validSelectedNote({ ...state, notes });
+    set({ notes, selectedNoteId, focusedCellId: null, searchResults: state.searchResults.filter(note => note.id !== id) });
+    if (selectedNoteId) void get().loadNoteBody(selectedNoteId);
   },
 
   restoreNote: async (id: string) => {
     await db.restoreNote(id);
-    set(state => ({
-      notes: state.notes.map(n =>
-        n.id === id ? { ...n, isTrashed: false } : n
-      ),
-    }));
+    const state = get();
+    const notes = state.notes.map(note => note.id === id ? { ...note, isTrashed: false } : note);
+    const selectedNoteId = validSelectedNote({ ...state, notes });
+    set({ notes, selectedNoteId, focusedCellId: null });
+    if (selectedNoteId) void get().loadNoteBody(selectedNoteId);
+  },
+
+  duplicateNote: async (id: string) => {
+    const note = await db.duplicateNote(id);
+    set(state => ({ notes: [note, ...state.notes], selectedNoteId: note.id, selectedNotebookId: note.notebookId,
+      selectedCollection: null, selectedTagId: null, focusedCellId: null }));
+    return note;
   },
 
   toggleFavorite: async (id: string) => {
@@ -430,6 +402,7 @@ export const useStore = create<Store>((set, get) => ({
   // ==================== DATA LOADING ====================
 
   loadData: async (databasePath?: string) => {
+    currentLibraryPath = null;
     conversionUndoStack.length = 0;
     noteBodyLoadPromises.clear();
     await db.initDatabase(databasePath);
@@ -437,20 +410,33 @@ export const useStore = create<Store>((set, get) => ({
 
     const [tags, notes, notebooks] = await Promise.all([
       db.getAllTags(),
-      db.getAllNoteSummaries(),
+      db.getAllNoteSummaries(true),
       db.getAllNotebooks(),
     ]);
-    const selectedNoteId = notes[0]?.id ?? null;
-
-    set({
+    const path = databasePath ?? 'sqlite:notch.db';
+    const preferences = readPreferences(path);
+    const next = {
+      ...get(),
       notebooks,
       tags,
       notes,
       selectedNotebookId: null,
-      selectedCollection: 'all',
+      selectedCollection: 'all' as SpecialCollection | null,
       selectedTagId: null,
-      selectedNoteId,
-    });
+      selectedNoteId: null,
+      ...preferences,
+    };
+    if (next.selectedNotebookId && !notebooks.some(notebook => notebook.id === next.selectedNotebookId)) {
+      next.selectedNotebookId = null;
+      next.selectedCollection = 'all';
+    }
+    if (next.selectedTagId && !tags.some(tag => tag.id === next.selectedTagId)) {
+      next.selectedTagId = null;
+      next.selectedCollection = 'all';
+    }
+    const selectedNoteId = validSelectedNote(next);
+    currentLibraryPath = path;
+    set({ ...next, selectedNoteId, focusedCellId: null, searchResults: [], searchQuery: '' });
 
     if (selectedNoteId) {
       void get().loadNoteBody(selectedNoteId);
@@ -469,7 +455,7 @@ export const useStore = create<Store>((set, get) => ({
         if (!note) return;
         set(state => ({
           notes: state.notes.map(existing =>
-            existing.id === id ? { ...existing, ...note, bodyLoaded: true } : existing
+            existing.id === id ? { ...existing, cells: note.cells, bodyLoaded: true } : existing
           ),
         }));
       })
@@ -481,6 +467,10 @@ export const useStore = create<Store>((set, get) => ({
     return loadPromise;
   },
 }));
+
+useStore.subscribe((state, previous) => {
+  if (currentLibraryPath && preferencesChanged(state, previous)) savePreferences(currentLibraryPath, state);
+});
 
 // Selector hooks for common state slices
 export const useNotebooks = () => useStore(state => state.notebooks);

@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react';
 import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
+import { readTextFile } from '@tauri-apps/plugin-fs';
 import { open, save, message, ask } from '@tauri-apps/plugin-dialog';
 import { useStore, useLayoutMode, useSidebarVisible } from './store';
-import { importQuiverLibrary, scanForDuplicates, type ImportProgress } from './services/import';
+import { importQuiverLibrary, scanForDuplicates, summarizeImport, type ImportProgress } from './services/import';
 import { exportNoteToMarkdown, exportNoteToHTML, exportNoteToJSON, exportLibraryToJSON, saveToFile } from './services/export';
-import { getNoteBySourceUuid, getNote } from './services/database';
+import { getNoteBySourceUuid, getNote, initDatabase, restoreLibrarySnapshot } from './services/database';
+import { parseLibraryBackup } from './services/backup';
 import { loadResourcesForNote } from './services/resources';
 import { checkForUpdates } from './services/updater';
 import {
@@ -28,6 +31,7 @@ import NoteEditor from './components/Editor/NoteEditor';
 import SearchOverlay from './components/Search/SearchOverlay';
 import SettingsModal from './components/Settings/SettingsModal';
 import type { EditorViewMode, LayoutMode } from './types';
+import { withMenuDismissal } from './utils/nativeActions';
 
 // Lazy so the assistant (and the pi packages it pulls) only load when shown,
 // keeping the core editor lightweight when the assistant is off.
@@ -59,11 +63,16 @@ declare global {
     __NOTCH__: {
       newNote: () => void;
       newNotebook: () => void;
+      duplicateNote: () => void;
+      trashNote: () => void;
+      restoreNote: () => void;
       newLibrary: () => void;
       openLibrary: () => void;
+      openSettings: () => void;
       importLibrary: () => void;
       exportNote: () => void;
       exportLibrary: () => void;
+      restoreLibrary: () => void;
       searchAllNotes: () => void;
       findInNote: () => void;
       toggleSidebar: () => void;
@@ -96,7 +105,17 @@ export default function App() {
   const loadData = useStore(state => state.loadData);
   const layoutMode = useLayoutMode();
   const sidebarVisible = useSidebarVisible();
+  const hasSelectedNote = useStore(state => state.notes.some(note => note.id === state.selectedNoteId));
+  const selectedNoteIsTrashed = useStore(state => state.notes.find(note => note.id === state.selectedNoteId)?.isTrashed ?? false);
+  const settingsOpen = useStore(state => state.settingsOpen);
   const activeLibrary = libraries.find(library => library.id === activeLibraryId) ?? libraries[0];
+
+  useEffect(() => {
+    void invoke('set_note_menu_state', {
+      hasNote: hasSelectedNote && !loading && !settingsOpen && !isCreateLibraryOpen && !isRenameLibraryOpen,
+      isTrashed: selectedNoteIsTrashed,
+    }).catch(err => console.warn('Could not update note menu:', err));
+  }, [hasSelectedNote, selectedNoteIsTrashed, loading, settingsOpen, isCreateLibraryOpen, isRenameLibraryOpen]);
 
   const handleCreateLibrary = useCallback(() => {
     setNewLibraryName('');
@@ -283,7 +302,7 @@ export default function App() {
     if (!activeLibrary) return;
 
     // Expose functions for Tauri menu events
-    window.__NOTCH__ = {
+    window.__NOTCH__ = withMenuDismissal({
       newNote: () => {
         const state = useStore.getState();
         const notebookId = state.selectedNotebookId || state.notebooks[0]?.id;
@@ -291,10 +310,41 @@ export default function App() {
           state.createNote(notebookId);
         }
       },
-      newNotebook: () => {
+      newNotebook: async () => {
         const name = prompt('Enter notebook name:');
-        if (name) {
-          useStore.getState().createNotebook(name);
+        if (name?.trim()) {
+          const state = useStore.getState();
+          const notebook = await state.createNotebook(name.trim());
+          await state.selectNotebook(notebook.id);
+        }
+      },
+      duplicateNote: async () => {
+        const state = useStore.getState();
+        if (!state.selectedNoteId) return;
+        try {
+          await state.duplicateNote(state.selectedNoteId);
+        } catch (err) {
+          await message(`Could not duplicate note: ${getErrorMessage(err)}`, { title: 'Duplicate Note', kind: 'error' });
+        }
+      },
+      trashNote: async () => {
+        const state = useStore.getState();
+        const note = state.notes.find(note => note.id === state.selectedNoteId);
+        if (!note || note.isTrashed) return;
+        try {
+          await state.deleteNote(note.id);
+        } catch (err) {
+          await message(`Could not move note to Trash: ${getErrorMessage(err)}`, { title: 'Move to Trash', kind: 'error' });
+        }
+      },
+      restoreNote: async () => {
+        const state = useStore.getState();
+        const note = state.notes.find(note => note.id === state.selectedNoteId);
+        if (!note?.isTrashed) return;
+        try {
+          await state.restoreNote(note.id);
+        } catch (err) {
+          await message(`Could not restore note: ${getErrorMessage(err)}`, { title: 'Restore Note', kind: 'error' });
         }
       },
       newLibrary: () => {
@@ -303,18 +353,13 @@ export default function App() {
       openLibrary: () => {
         void handleOpenLibrary();
       },
+      openSettings: () => {
+        useStore.getState().setSettingsOpen(true);
+      },
       importLibrary: async () => {
-        const selected = await open({
-          multiple: false,
-          title: 'Select Quiver Library (.qvlibrary)',
-          filters: [{
-            name: 'Quiver Library',
-            extensions: ['qvlibrary']
-          }]
-        });
-        if (!selected) return;
-
         try {
+          const selected = await invoke<string | null>('select_quiver_library');
+          if (!selected) return;
           // Scan for duplicates first
           setImportProgress({
             phase: 'scanning',
@@ -373,25 +418,8 @@ export default function App() {
           setImportProgress(null);
           await useStore.getState().loadData(activeLibrary.dbPath);
 
-          // Format result message
-          let msg = `Successfully imported ${result.notesImported} notes from ${result.notebooks} notebooks.`;
-          if (result.notebooksSkipped > 0) {
-            msg += `\n\nSkipped ${result.notebooksSkipped} duplicate notebook(s).`;
-          }
-          if (result.notesFailed > 0) {
-            msg += `\n\nFailed to import ${result.notesFailed} notes:`;
-            for (const err of result.errors.slice(0, 10)) {
-              msg += `\n• "${err.noteTitle}": ${err.error}`;
-            }
-            if (result.errors.length > 10) {
-              msg += `\n... and ${result.errors.length - 10} more errors`;
-            }
-          }
-
-          await message(msg, {
-            title: result.notesFailed > 0 ? 'Import Completed with Errors' : 'Import Completed',
-            kind: result.notesFailed > 0 ? 'warning' : 'info',
-          });
+          const summary = summarizeImport(result);
+          await message(summary.text, { title: summary.title, kind: summary.kind });
         } catch (err) {
           setImportProgress(null);
           await message(`Import failed: ${err}`, { title: 'Import Error', kind: 'error' });
@@ -462,6 +490,44 @@ export default function App() {
           }
         }
       },
+      restoreLibrary: async () => {
+        const previous = activeLibrary;
+        let startedRestore = false;
+        try {
+          const selected = await open({ title: 'Restore Notch Backup', multiple: false,
+            filters: [{ name: 'Notch JSON backup', extensions: ['json'] }] });
+          if (typeof selected !== 'string') return;
+          const snapshot = parseLibraryBackup(await readTextFile(selected));
+          const destination = await save({ title: 'Restore into a New Library',
+            defaultPath: 'Restored Library.notch', filters: [{ name: 'Notch Library', extensions: ['notch'] }] });
+          if (!destination) return;
+          startedRestore = true;
+          setLoading(true);
+          const name = destination.split('/').pop()?.replace(/\.notch$/i, '') || 'Restored Library';
+          const restored = await createLibrary(name, destination);
+          await initDatabase(restored.dbPath);
+          await restoreLibrarySnapshot(snapshot);
+          await activateLibrary(restored);
+          await message(`Restored ${snapshot.notes.length} notes, including Trash, and ${snapshot.resources.length} resources into ${name}.`, { title: 'Backup Restored' });
+        } catch (err) {
+          // A failed restore cannot replace the active library or its contents.
+          let recoveryError = '';
+          try {
+            if (startedRestore && previous) {
+              setActiveLibraryId(previous.id);
+              setActiveLibrary(previous.id);
+              setLibraries(getLibraries());
+              await loadData(previous.dbPath);
+            }
+          } catch (rollbackError) {
+            recoveryError = `\nThe previous library could not be reopened: ${getErrorMessage(rollbackError)}`;
+            setError(recoveryError.trim());
+          } finally {
+            setLoading(false);
+          }
+          await message(`Could not restore backup: ${getErrorMessage(err)}${recoveryError}`, { title: 'Restore Failed', kind: 'error' });
+        }
+      },
       searchAllNotes: () => {
         setShowSearch(true);
         setShowFindBar(false);
@@ -482,8 +548,8 @@ export default function App() {
       checkForUpdates: () => {
         void checkForUpdates(false);
       },
-    };
-  }, [activeLibrary, handleCreateLibrary, handleOpenLibrary, loadData]);
+    }, () => window.dispatchEvent(new Event('notch-dismiss-menus')));
+  }, [activeLibrary, activateLibrary, handleCreateLibrary, handleOpenLibrary, loadData]);
 
   // Quietly check for updates shortly after launch.
   useEffect(() => {
@@ -742,6 +808,9 @@ export default function App() {
   useEffect(() => {
     // Setup keyboard shortcuts
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Keep app navigation shortcuts from acting on notes behind a dialog.
+      if (useStore.getState().settingsOpen || document.querySelector('[role="dialog"], .library-dialog-overlay')) return;
+      if (e.metaKey || e.ctrlKey) window.dispatchEvent(new Event('notch-dismiss-menus'));
       // Cmd+Z: Undo (let browser handle it for contentEditable)
       if (e.metaKey && e.key === 'z' && !e.shiftKey) {
         const target = e.target as HTMLElement | null;
@@ -863,7 +932,7 @@ export default function App() {
   } as CSSProperties;
 
   return (
-    <div className="app" style={appStyle}>
+    <div className={`app${assistantVisible ? ' assistant-open' : ''}`} style={appStyle}>
       {sidebarVisible && layoutMode === 'triple' && (
         <>
           <Sidebar
@@ -911,7 +980,7 @@ export default function App() {
             aria-orientation="vertical"
             onPointerDown={e => startColumnResize('assistant', e)}
           />
-          <div className="assistant-column" style={{ width: 'var(--assistant-width)', flexShrink: 0 }}>
+          <div className="assistant-column">
             <Suspense fallback={<div className="assistant-loading">Loading assistant…</div>}>
               <AssistantPanel />
             </Suspense>
