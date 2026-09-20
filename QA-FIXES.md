@@ -29,8 +29,8 @@ Updated September 19, 2026. This records implementation and retesting after
 
 The tested package is `src-tauri/target/debug/bundle/macos/Notch QA.app`, with a
 distinct `com.notch.qa` identifier and window title. It is a development build,
-not a signed release. The installed application was not replaced. All changes
-remain uncommitted, including the user's earlier changes.
+not a signed release. The installed application was not replaced. The tested
+changes and the user's earlier changes are included in the 0.3.0 release work.
 
 ## Retained QA data
 
