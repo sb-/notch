@@ -5,6 +5,7 @@ import type { Note, Cell } from '../types';
 import * as db from './database';
 import { renderMarkdown } from './markdown';
 import { resolveResourceHtml, inlineResourceRefs } from './resources';
+import { parseLibraryBackup } from './backup';
 
 /**
  * Export a note to Markdown format
@@ -192,7 +193,7 @@ export function exportNoteToJSON(note: Note): string {
     tags: note.tags,
     cells: note.cells.map(cell => ({
       type: cell.type,
-      data: cell.data,
+      data: inlineResourceRefs(cell.data),
       language: cell.language,
       diagramType: cell.diagramType,
     })),
@@ -272,19 +273,18 @@ export async function exportLibraryToJSON(): Promise<string> {
   const notebooks = await db.getAllNotebooks();
   const tags = await db.getAllTags();
 
-  const notesWithDetails: Note[] = [];
-  for (const notebook of notebooks) {
-    const notes = await db.getNotesByNotebook(notebook.id);
-    notesWithDetails.push(...notes);
-  }
-
-  return JSON.stringify({
-    version: 1,
+  const notes = await db.getAllNotes(true);
+  const resources = (await Promise.all(notes.map(note => db.getResourcesByNote(note.id)))).flat();
+  const snapshot = {
+    version: 2,
     exportedAt: Date.now(),
     notebooks,
     tags,
-    notes: notesWithDetails,
-  }, null, 2);
+    notes,
+    resources,
+  };
+  // Never report a complete backup when a referenced image is absent.
+  return JSON.stringify(parseLibraryBackup(JSON.stringify(snapshot)), null, 2);
 }
 
 /**

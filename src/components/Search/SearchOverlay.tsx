@@ -2,6 +2,8 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useStore } from '../../store';
 import { searchNotes } from '../../services/search';
 import type { Note } from '../../types';
+import { searchExcerpt } from '../../utils/searchExcerpt';
+import './SearchOverlay.css';
 
 interface SearchOverlayProps {
   onClose: () => void;
@@ -55,11 +57,6 @@ export default function SearchOverlay({ onClose }: SearchOverlayProps) {
     return notebooks.find(n => n.id === notebookId)?.name || '';
   };
 
-  const getPreview = (note: Note) => {
-    const text = note.cells.map(c => c.data).join(' ').replace(/<[^>]+>/g, '');
-    return text.substring(0, 120);
-  };
-
   return (
     <div className="search-overlay" onClick={onClose}>
       <div className="search-modal" onClick={e => e.stopPropagation()}>
@@ -90,7 +87,11 @@ export default function SearchOverlay({ onClose }: SearchOverlayProps) {
                 <div className="search-result-title">{note.title}</div>
                 <div className="search-result-meta">
                   <span className="search-result-notebook">{getNotebookName(note.notebookId)}</span>
-                  <span className="search-result-preview">{getPreview(note)}</span>
+                  <span className="search-result-preview">
+                    {searchExcerpt(note.cells, query).map((part, partIndex) => part.matched
+                      ? <mark key={partIndex}>{part.text}</mark>
+                      : part.text)}
+                  </span>
                 </div>
               </div>
             ))}

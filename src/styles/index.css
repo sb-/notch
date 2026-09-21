@@ -87,6 +87,28 @@ body {
   width: 100vw;
 }
 
+.assistant-column {
+  width: var(--assistant-width);
+  max-width: 42vw;
+  min-width: 260px;
+  flex-shrink: 0;
+}
+
+/* Leave enough room to edit when the assistant is open in a small window. */
+@media (max-width: 1100px) {
+  .app.assistant-open .sidebar,
+  .app.assistant-open .sidebar + .column-resizer {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .app.assistant-open .note-list {
+    width: 180px;
+    min-width: 180px;
+  }
+}
+
 .app-state {
   align-items: center;
   justify-content: center;
@@ -216,8 +238,31 @@ body {
 
 .library-switcher {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   padding: 8px;
   border-bottom: 1px solid var(--border-color);
+}
+.library-switcher-button {
+  flex: 1;
+  min-width: 0;
+}
+.sidebar-settings-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+}
+.sidebar-settings-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .library-switcher-button {
@@ -738,6 +783,7 @@ body {
   flex-direction: column;
   background: var(--bg-primary);
   min-width: 0;
+  container-type: inline-size;
 }
 
 .editor.pending-note-switch .editor-header,
@@ -761,6 +807,7 @@ body {
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border-color);
   margin-bottom: 8px;
+  flex-wrap: wrap;
 }
 
 .editor-notebook-select {
@@ -802,6 +849,8 @@ body {
   font-size: var(--font-size-sm);
   cursor: pointer;
   position: relative;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .editor-tags svg {
@@ -835,12 +884,15 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .editor-toolbar-left {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 6px 12px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .cell-type-dropdown {
@@ -855,6 +907,8 @@ body {
   cursor: pointer;
   background: var(--bg-primary);
   position: relative;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .cell-type-dropdown:hover {
@@ -865,6 +919,8 @@ body {
   display: flex;
   align-items: center;
   gap: 2px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .editor-code-language {
@@ -895,6 +951,8 @@ body {
   display: flex;
   align-items: center;
   gap: 0;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .editor-view-btn {
@@ -983,6 +1041,7 @@ body {
   display: flex;
   flex: 1;
   overflow: hidden;
+  min-height: 0;
 }
 
 .editor-split .editor-pane {
@@ -990,6 +1049,7 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -1039,6 +1099,32 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+}
+
+@container (max-width: 600px) {
+  .editor-split {
+    flex-direction: column;
+  }
+
+  .editor-split .editor-pane + .editor-pane {
+    border-left: 0;
+    border-top: 1px solid var(--border-color);
+  }
+
+  .editor-split .editor-pane:first-child {
+    border-right: 0;
+  }
+
+  .editor-header {
+    padding-inline: 10px;
+  }
+
+  .editor-title,
+  .editor-content {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
 }
 
 .cell {
@@ -1982,7 +2068,10 @@ body {
   appearance: none;
   -webkit-appearance: none;
   min-width: 168px;
-  height: 30px;
+  /* Match .format-btn height so the toolbar is the same height for every cell
+     type (the code-cell select used to be 4px taller than the format buttons,
+     making the bar jump when a code cell was selected). */
+  height: 26px;
   background: var(--bg-primary);
   color: var(--text-primary);
   border: 1px solid var(--border-color);

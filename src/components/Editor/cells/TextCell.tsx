@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useCallback } from 'react';
-import { sanitizeRichText } from '../../../services/html';
+import { sanitizeRichText, normalizeRichTextColors } from '../../../services/html';
+import { decideTextCellPaste } from '../../../services/links';
 import {
   createResourceFromFile,
   resolveResourceHtml,
@@ -15,6 +16,7 @@ interface TextCellProps {
   onChange: (data: string) => void;
   onFocus: () => void;
   isFocused?: boolean;
+  focusRequest?: number;
   onBackspaceEmpty?: () => void;
   onNavigatePrev?: () => void;
   onNavigateNext?: () => void;
@@ -26,6 +28,7 @@ export default function TextCell({
   onChange,
   onFocus,
   isFocused,
+  focusRequest,
   onBackspaceEmpty,
   onNavigatePrev,
   onNavigateNext,
@@ -63,6 +66,7 @@ export default function TextCell({
   // Handle input changes - store the dehydrated form (resource refs, not data URLs).
   const handleInput = useCallback(() => {
     if (editorRef.current && !isComposing.current) {
+      normalizeRichTextColors(editorRef.current);
       onChange(dehydrateResourceHtml(editorRef.current.innerHTML));
     }
   }, [onChange]);
@@ -95,7 +99,13 @@ export default function TextCell({
     const editor = editorRef.current;
     if (!editor) return;
 
-    const isEmpty = !editor.textContent?.trim() && !editor.querySelector('img');
+    // Blank lines are <br>/<div> markup with no textContent, so only treat the
+    // cell as empty when there's no line structure left for backspace to delete.
+    const isEmpty =
+      !editor.textContent?.trim() &&
+      !editor.querySelector('img') &&
+      editor.querySelectorAll('br').length <= 1 &&
+      editor.querySelectorAll('div, p').length <= 1;
 
     if (e.key === 'Backspace' && isEmpty && onBackspaceEmpty) {
       e.preventDefault();
@@ -127,7 +137,7 @@ export default function TextCell({
 
   // Auto-focus when cell becomes focused
   useEffect(() => {
-    if (isFocused && editorRef.current) {
+    if (isFocused && editorRef.current && document.activeElement !== editorRef.current) {
       editorRef.current.focus();
       // Place cursor at end
       const selection = window.getSelection();
@@ -137,7 +147,7 @@ export default function TextCell({
       selection?.removeAllRanges();
       selection?.addRange(range);
     }
-  }, [isFocused]);
+  }, [isFocused, focusRequest]);
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const files = Array.from(e.clipboardData.files);
@@ -149,12 +159,26 @@ export default function TextCell({
     e.preventDefault();
     const html = e.clipboardData.getData('text/html');
     const text = e.clipboardData.getData('text/plain');
-    if (html) {
-      document.execCommand('insertHTML', false, sanitizeRichText(html));
+    const selection = window.getSelection();
+    const editor = editorRef.current;
+    const hasSelection = Boolean(
+      editor &&
+      selection &&
+      !selection.isCollapsed &&
+      selection.rangeCount > 0 &&
+      editor.contains(selection.anchorNode)
+    );
+
+    const decision = decideTextCellPaste({ html, text, hasSelection });
+    if (decision.action === 'createLink') {
+      document.execCommand('createLink', false, decision.href);
+    } else if (decision.action === 'insertHtml') {
+      document.execCommand('insertHTML', false, sanitizeRichText(decision.html));
     } else {
-      document.execCommand('insertText', false, text);
+      document.execCommand('insertText', false, decision.text);
     }
-  }, [insertImageFiles]);
+    handleInput();
+  }, [insertImageFiles, handleInput]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     const files = Array.from(e.dataTransfer.files);
@@ -197,6 +221,9 @@ export default function TextCell({
     <div
       ref={editorRef}
       className="cell-textarea cell-richtext"
+      role="textbox"
+      aria-label="Text cell"
+      aria-multiline="true"
       contentEditable
       onInput={handleInput}
       onFocus={onFocus}

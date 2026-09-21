@@ -10,7 +10,10 @@ import {
   createResourceFromBase64,
   bytesToBase64,
   RESOURCE_PROTOCOL,
+  getResourceDataUrl,
 } from '../../services/resources';
+import { sanitizeRichText } from '../../services/html';
+import { escapeHtml, formatMarkdownSelection, type FormattingAction } from './formatting';
 import { LANGUAGE_OPTIONS, toMonacoLanguage } from './codeLanguages';
 import type { CellType, EditorViewMode, Note } from '../../types';
 
@@ -55,11 +58,14 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   const addTagToNote = useStore(state => state.addTagToNote);
   const removeTagFromNote = useStore(state => state.removeTagFromNote);
   const createTag = useStore(state => state.createTag);
+  const toggleAssistant = useStore(state => state.toggleAssistant);
+  const assistantVisible = useStore(state => state.assistantVisible);
 
   const [showCellTypeMenu, setShowCellTypeMenu] = useState(false);
   const [showTagMenu, setShowTagMenu] = useState(false);
   const [showNotebookMenu, setShowNotebookMenu] = useState(false);
   const [focusedCellId, setFocusedCellId] = useState<string | null>(null);
+  const [focusRequest, setFocusRequest] = useState(0);
   const [newTagName, setNewTagName] = useState('');
   const contentRef = useRef<HTMLDivElement>(null);
   const pendingNoteSwitch = Boolean(selectedNote && !selectedNote.bodyLoaded);
@@ -82,6 +88,13 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   // "Text Cell" while focusedCellId catches up after a note/cell switch.
   const focusedCell = note?.cells.find(c => c.id === focusedCellId) ?? note?.cells[0] ?? null;
   const effectiveFocusedCellId = focusedCell?.id ?? null;
+
+  // Mirror the focused cell to the store so other panels (e.g. the assistant)
+  // can insert into the cell the user is actually working in.
+  const setFocusedCellIdStore = useStore(state => state.setFocusedCellId);
+  useEffect(() => {
+    setFocusedCellIdStore(effectiveFocusedCellId);
+  }, [effectiveFocusedCellId, setFocusedCellIdStore]);
   const currentCellType = focusedCell?.type || 'text';
   const currentCodeLanguage = toMonacoLanguage(focusedCell?.language || 'javascript');
   const hasKnownCodeLanguage = LANGUAGE_OPTIONS.some(option => option.id === currentCodeLanguage);
@@ -148,11 +161,29 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
     }
   };
 
-  const closeAllMenus = () => {
+  const closeAllMenus = useCallback(() => {
     setShowNotebookMenu(false);
     setShowTagMenu(false);
     setShowCellTypeMenu(false);
-  };
+  }, []);
+
+  useEffect(() => {
+    closeAllMenus();
+  }, [selectedNote?.id, closeAllMenus]);
+
+  useEffect(() => {
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeAllMenus();
+    };
+    window.addEventListener('notch-dismiss-menus', closeAllMenus);
+    window.addEventListener('blur', closeAllMenus);
+    window.addEventListener('keydown', dismissOnEscape);
+    return () => {
+      window.removeEventListener('notch-dismiss-menus', closeAllMenus);
+      window.removeEventListener('blur', closeAllMenus);
+      window.removeEventListener('keydown', dismissOnEscape);
+    };
+  }, [closeAllMenus]);
 
   const handleDeleteCell = useCallback(async (cellId: string) => {
     if (!note || showingPreviousNote || note.cells.length <= 1) return; // Don't delete the last cell
@@ -188,11 +219,57 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   const handleKeyDown = useCallback(async (e: React.KeyboardEvent) => {
     if (e.shiftKey && e.key === 'Enter' && note && !showingPreviousNote) {
       e.preventDefault();
+      e.stopPropagation();
       const afterCellId = effectiveFocusedCellId || note.cells[note.cells.length - 1]?.id;
       const newCell = await addCell(note.id, currentCellType, afterCellId);
-      setFocusedCellId(newCell.id);
+      if (useStore.getState().selectedNoteId === note.id) setFocusedCellId(newCell.id);
     }
   }, [note, showingPreviousNote, effectiveFocusedCellId, currentCellType, addCell]);
+
+  const handleTitleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== 'Enter' || event.nativeEvent.isComposing || !note || showingPreviousNote) return;
+    event.preventDefault();
+    if (editorViewMode === 'preview') setEditorViewMode('editor');
+    setFocusedCellId(note.cells[0]?.id ?? null);
+    setFocusRequest(request => request + 1);
+  };
+
+  const getFocusedCellElement = useCallback(() => {
+    return Array.from(contentRef.current?.querySelectorAll<HTMLElement>('[data-cell-id]') ?? [])
+      .find(element => element.dataset.cellId === effectiveFocusedCellId);
+  }, [effectiveFocusedCellId]);
+
+  const handleFormat = async (action: FormattingAction) => {
+    if (!note || showingPreviousNote || !focusedCell) return;
+    const element = getFocusedCellElement();
+    if (focusedCell.type === 'markdown') {
+      const textarea = element?.querySelector<HTMLTextAreaElement>('textarea');
+      if (!textarea) return;
+      const result = formatMarkdownSelection(textarea.value, textarea.selectionStart, textarea.selectionEnd, action);
+      await updateCell(note.id, focusedCell.id, { data: result.data });
+      requestAnimationFrame(() => {
+        if (!textarea.isConnected) return;
+        textarea.focus();
+        textarea.setSelectionRange(result.start, result.end);
+      });
+    } else if (focusedCell.type === 'text') {
+      const editor = element?.querySelector<HTMLElement>('[contenteditable="true"]');
+      if (!editor) return;
+      editor.focus();
+      const commands: Partial<Record<FormattingAction, string>> = {
+        bold: 'bold', italic: 'italic', underline: 'underline', strike: 'strikeThrough',
+        bullet: 'insertUnorderedList', numbered: 'insertOrderedList', rule: 'insertHorizontalRule',
+      };
+      if (action === 'code') {
+        document.execCommand('insertHTML', false, `<code>${escapeHtml(window.getSelection()?.toString() || '\u200b')}</code>`);
+      } else if (action === 'h1' || action === 'h2' || action === 'h3') {
+        document.execCommand('formatBlock', false, action);
+      } else if (commands[action]) {
+        document.execCommand(commands[action]!);
+      }
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  };
 
   // Create default cell if note has no cells, and auto-focus first cell
   useEffect(() => {
@@ -236,6 +313,13 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
 
   const handleInsertImage = useCallback(async () => {
     if (!note || showingPreviousNote) return;
+    const cellElement = getFocusedCellElement();
+    const textEditor = cellElement?.querySelector<HTMLElement>('[contenteditable="true"]');
+    const textarea = cellElement?.querySelector<HTMLTextAreaElement>('.markdown-editor-input');
+    const selection = window.getSelection();
+    const range = textEditor && selection?.rangeCount && textEditor.contains(selection.anchorNode)
+      ? selection.getRangeAt(0).cloneRange() : null;
+    const textSelection = textarea ? { start: textarea.selectionStart, end: textarea.selectionEnd } : null;
     const selected = await open({
       multiple: false,
       title: 'Insert Image',
@@ -250,18 +334,43 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
     const bytes = await readFile(path);
     const id = await createResourceFromBase64(note.id, name, mime, bytesToBase64(bytes));
     const alt = name.replace(/\.[^.]+$/, '');
-    const ref = `![${alt}](${RESOURCE_PROTOCOL}${id})`;
+    const ref = `![${alt.replace(/[\[\]\\]/g, '\\$&')}](${RESOURCE_PROTOCOL}${id})`;
 
-    const focused = note.cells.find(c => c.id === effectiveFocusedCellId);
+    const focused = useStore.getState().notes.find(item => item.id === note.id)?.cells.find(c => c.id === effectiveFocusedCellId);
     if (focused && focused.type === 'markdown') {
-      const sep = focused.data.trim() ? '\n\n' : '';
-      await updateCell(note.id, focused.id, { data: `${focused.data}${sep}${ref}\n` });
+      const start = textSelection?.start ?? focused.data.length;
+      const end = textSelection?.end ?? start;
+      const snippet = `\n${ref}\n`;
+      await updateCell(note.id, focused.id, { data: focused.data.slice(0, start) + snippet + focused.data.slice(end) });
+      requestAnimationFrame(() => {
+        if (!textarea?.isConnected) return;
+        textarea.focus();
+        textarea.setSelectionRange(start + snippet.length, start + snippet.length);
+      });
+    } else if (focused && focused.type === 'text') {
+      const stableImage = `<img src="${RESOURCE_PROTOCOL}${id}" data-resource-id="${id}" alt="${escapeHtml(alt)}">`;
+      if (textEditor?.isConnected && useStore.getState().selectedNoteId === note.id) {
+        textEditor.focus();
+        const currentSelection = window.getSelection();
+        const insertionRange = range && textEditor.contains(range.commonAncestorContainer) ? range : document.createRange();
+        if (insertionRange !== range) {
+          insertionRange.selectNodeContents(textEditor);
+          insertionRange.collapse(false);
+        }
+        currentSelection?.removeAllRanges();
+        currentSelection?.addRange(insertionRange);
+        const renderedImage = stableImage.replace(`${RESOURCE_PROTOCOL}${id}`, getResourceDataUrl(id) || `${RESOURCE_PROTOCOL}${id}`);
+        document.execCommand('insertHTML', false, renderedImage);
+        textEditor.dispatchEvent(new Event('input', { bubbles: true }));
+      } else {
+        await updateCell(note.id, focused.id, { data: sanitizeRichText(focused.data + stableImage) });
+      }
     } else {
       const cell = await addCell(note.id, 'markdown', effectiveFocusedCellId ?? undefined);
       await updateCell(note.id, cell.id, { data: `${ref}\n` });
       setFocusedCellId(cell.id);
     }
-  }, [note, showingPreviousNote, effectiveFocusedCellId, addCell, updateCell]);
+  }, [note, showingPreviousNote, effectiveFocusedCellId, getFocusedCellElement, addCell, updateCell]);
 
   if (!note) {
     if (pendingNoteSwitch) {
@@ -297,7 +406,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   const availableTags = tags.filter(t => !note.tags.includes(t.name));
 
   const renderEditor = () => (
-    <div className="editor-content" ref={contentRef} onKeyDown={handleKeyDown} onClick={closeAllMenus}>
+    <div className="editor-content" ref={contentRef} onKeyDownCapture={handleKeyDown} onClick={closeAllMenus}>
       <div className="cells-container">
         {note.cells.map((cell) => (
           <CellContainer
@@ -305,6 +414,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
             noteId={note.id}
             cell={cell}
             isFocused={effectiveFocusedCellId === cell.id}
+            focusRequest={focusRequest}
             onFocus={() => setFocusedCellId(cell.id)}
             onDelete={() => handleDeleteCell(cell.id)}
             canDelete={note.cells.length > 1}
@@ -319,7 +429,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   const renderPreview = () => (
     <div className="editor-content">
       <Suspense fallback={<div className="preview-loading" aria-label="Loading preview" />}>
-        <NotePreview note={note} />
+        <NotePreview note={note} showHeader={false} />
       </Suspense>
     </div>
   );
@@ -449,22 +559,21 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
                   ))}
                 </select>
               </div>
-            ) : (
+            ) : currentCellType === 'text' || currentCellType === 'markdown' ? (
               <div className="editor-format-buttons">
-                <button className="format-btn" title="Bold (⌘B)"><strong>B</strong></button>
-                <button className="format-btn" title="Italic (⌘I)"><em>I</em></button>
-                <button className="format-btn" title="Underline (⌘U)"><span style={{textDecoration:'underline'}}>U</span></button>
-                <button className="format-btn" title="Strikethrough"><span style={{textDecoration:'line-through'}}>S</span></button>
-                <button className="format-btn" title="Code">{'{}'}</button>
-                <button className="format-btn" title="Bullet List">•≡</button>
-                <button className="format-btn" title="Numbered List">1≡</button>
-                <button className="format-btn" title="Checkbox">☐</button>
-                <button className="format-btn" title="Horizontal Rule">—</button>
-                <button className="format-btn" title="Heading 1">H1</button>
-                <button className="format-btn" title="Heading 2">H2</button>
-                <button className="format-btn" title="Heading 3">H3</button>
+                {([
+                  ['bold', 'Bold', <strong>B</strong>], ['italic', 'Italic', <em>I</em>],
+                  ['underline', 'Underline', <u>U</u>], ['strike', 'Strikethrough', <s>S</s>],
+                  ['code', 'Inline Code', '{}'], ['bullet', 'Bullet List', '•≡'],
+                  ['numbered', 'Numbered List', '1≡'], ['checkbox', 'Checkbox', '☐'],
+                  ['rule', 'Horizontal Rule', '—'], ['h1', 'Heading 1', 'H1'], ['h2', 'Heading 2', 'H2'], ['h3', 'Heading 3', 'H3'],
+                ] as const).filter(([action]) => action !== 'checkbox' || currentCellType === 'markdown').map(([action, label, icon]) => (
+                  <button key={action} className="format-btn" title={label} aria-label={label}
+                    disabled={editorViewMode === 'preview' || showingPreviousNote}
+                    onMouseDown={event => event.preventDefault()} onClick={() => handleFormat(action)}>{icon}</button>
+                ))}
               </div>
-            )}
+            ) : null}
           </div>
 
           <div className="editor-toolbar-right">
@@ -514,6 +623,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
             className="editor-title-input"
             value={note.title}
             onChange={handleTitleChange}
+            onKeyDown={handleTitleKeyDown}
             readOnly={showingPreviousNote}
             placeholder="Untitled"
           />
@@ -557,12 +667,22 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
         <button
           className="editor-footer-btn"
           title="Insert Image"
+          onMouseDown={event => event.preventDefault()}
           onClick={handleInsertImage}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
             <circle cx="8.5" cy="8.5" r="1.5"/>
             <polyline points="21 15 16 10 5 21"/>
+          </svg>
+        </button>
+        <button
+          className={`editor-footer-btn ${assistantVisible ? 'active' : ''}`}
+          title="Toggle Assistant (⌘J)"
+          onClick={() => toggleAssistant()}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
         </button>
       </div>

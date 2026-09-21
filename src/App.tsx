@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react';
 import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
+import { readTextFile } from '@tauri-apps/plugin-fs';
 import { open, save, message, ask } from '@tauri-apps/plugin-dialog';
 import { useStore, useLayoutMode, useSidebarVisible } from './store';
-import { importQuiverLibrary, scanForDuplicates, type ImportProgress } from './services/import';
+import { importQuiverLibrary, scanForDuplicates, summarizeImport, type ImportProgress } from './services/import';
 import { exportNoteToMarkdown, exportNoteToHTML, exportNoteToJSON, exportLibraryToJSON, saveToFile } from './services/export';
-import { getNoteBySourceUuid, getNote } from './services/database';
+import { getNoteBySourceUuid, getNote, initDatabase, restoreLibrarySnapshot } from './services/database';
+import { parseLibraryBackup } from './services/backup';
 import { loadResourcesForNote } from './services/resources';
 import { checkForUpdates } from './services/updater';
 import {
@@ -26,10 +29,17 @@ import Sidebar from './components/Sidebar/Sidebar';
 import NoteList from './components/NoteList/NoteList';
 import NoteEditor from './components/Editor/NoteEditor';
 import SearchOverlay from './components/Search/SearchOverlay';
+import SettingsModal from './components/Settings/SettingsModal';
 import type { EditorViewMode, LayoutMode } from './types';
+import { withMenuDismissal } from './utils/nativeActions';
+
+// Lazy so the assistant (and the pi packages it pulls) only load when shown,
+// keeping the core editor lightweight when the assistant is off.
+const AssistantPanel = lazy(() => import('./assistant/AssistantPanel'));
 
 const SIDEBAR_WIDTH_KEY = 'notch.sidebarWidth';
 const NOTELIST_WIDTH_KEY = 'notch.noteListWidth';
+const ASSISTANT_WIDTH_KEY = 'notch.assistantWidth';
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
@@ -53,11 +63,16 @@ declare global {
     __NOTCH__: {
       newNote: () => void;
       newNotebook: () => void;
+      duplicateNote: () => void;
+      trashNote: () => void;
+      restoreNote: () => void;
       newLibrary: () => void;
       openLibrary: () => void;
+      openSettings: () => void;
       importLibrary: () => void;
       exportNote: () => void;
       exportLibrary: () => void;
+      restoreLibrary: () => void;
       searchAllNotes: () => void;
       findInNote: () => void;
       toggleSidebar: () => void;
@@ -76,6 +91,8 @@ export default function App() {
   const [showFindBar, setShowFindBar] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(() => getStoredWidth(SIDEBAR_WIDTH_KEY, 180, 140, 360));
   const [noteListWidth, setNoteListWidth] = useState(() => getStoredWidth(NOTELIST_WIDTH_KEY, 240, 180, 520));
+  const [assistantWidth, setAssistantWidth] = useState(() => getStoredWidth(ASSISTANT_WIDTH_KEY, 320, 260, 560));
+  const assistantVisible = useStore(state => state.assistantVisible);
   const [libraries, setLibraries] = useState<LibraryInfo[]>(() => getLibraries());
   const [activeLibraryId, setActiveLibrary] = useState(() => getActiveLibraryId());
   const [isCreateLibraryOpen, setIsCreateLibraryOpen] = useState(false);
@@ -88,7 +105,17 @@ export default function App() {
   const loadData = useStore(state => state.loadData);
   const layoutMode = useLayoutMode();
   const sidebarVisible = useSidebarVisible();
+  const hasSelectedNote = useStore(state => state.notes.some(note => note.id === state.selectedNoteId));
+  const selectedNoteIsTrashed = useStore(state => state.notes.find(note => note.id === state.selectedNoteId)?.isTrashed ?? false);
+  const settingsOpen = useStore(state => state.settingsOpen);
   const activeLibrary = libraries.find(library => library.id === activeLibraryId) ?? libraries[0];
+
+  useEffect(() => {
+    void invoke('set_note_menu_state', {
+      hasNote: hasSelectedNote && !loading && !settingsOpen && !isCreateLibraryOpen && !isRenameLibraryOpen,
+      isTrashed: selectedNoteIsTrashed,
+    }).catch(err => console.warn('Could not update note menu:', err));
+  }, [hasSelectedNote, selectedNoteIsTrashed, loading, settingsOpen, isCreateLibraryOpen, isRenameLibraryOpen]);
 
   const handleCreateLibrary = useCallback(() => {
     setNewLibraryName('');
@@ -185,24 +212,32 @@ export default function App() {
   }, [handleOpenLibraryPath]);
 
   const startColumnResize = (
-    column: 'sidebar' | 'noteList',
+    column: 'sidebar' | 'noteList' | 'assistant',
     e: ReactPointerEvent<HTMLDivElement>
   ) => {
     e.preventDefault();
 
-    const isSidebar = column === 'sidebar';
     const startX = e.clientX;
-    const startWidth = isSidebar ? sidebarWidth : noteListWidth;
-    const min = isSidebar ? 140 : 180;
-    const max = isSidebar ? 360 : 520;
-    const storageKey = isSidebar ? SIDEBAR_WIDTH_KEY : NOTELIST_WIDTH_KEY;
-    const setWidth = isSidebar ? setSidebarWidth : setNoteListWidth;
+    let startWidth: number;
+    let min: number;
+    let max: number;
+    let storageKey: string;
+    let setWidth: (width: number) => void;
+    // The assistant sits on the right, so dragging left (negative delta) grows it.
+    let dir = 1;
+    if (column === 'sidebar') {
+      startWidth = sidebarWidth; min = 140; max = 360; storageKey = SIDEBAR_WIDTH_KEY; setWidth = setSidebarWidth;
+    } else if (column === 'noteList') {
+      startWidth = noteListWidth; min = 180; max = 520; storageKey = NOTELIST_WIDTH_KEY; setWidth = setNoteListWidth;
+    } else {
+      startWidth = assistantWidth; min = 260; max = 560; storageKey = ASSISTANT_WIDTH_KEY; setWidth = setAssistantWidth; dir = -1;
+    }
     let latestWidth = startWidth;
 
     document.body.classList.add('resizing-column');
 
     const handlePointerMove = (event: PointerEvent) => {
-      latestWidth = clamp(startWidth + event.clientX - startX, min, max);
+      latestWidth = clamp(startWidth + dir * (event.clientX - startX), min, max);
       setWidth(latestWidth);
     };
 
@@ -267,7 +302,7 @@ export default function App() {
     if (!activeLibrary) return;
 
     // Expose functions for Tauri menu events
-    window.__NOTCH__ = {
+    window.__NOTCH__ = withMenuDismissal({
       newNote: () => {
         const state = useStore.getState();
         const notebookId = state.selectedNotebookId || state.notebooks[0]?.id;
@@ -275,10 +310,41 @@ export default function App() {
           state.createNote(notebookId);
         }
       },
-      newNotebook: () => {
+      newNotebook: async () => {
         const name = prompt('Enter notebook name:');
-        if (name) {
-          useStore.getState().createNotebook(name);
+        if (name?.trim()) {
+          const state = useStore.getState();
+          const notebook = await state.createNotebook(name.trim());
+          await state.selectNotebook(notebook.id);
+        }
+      },
+      duplicateNote: async () => {
+        const state = useStore.getState();
+        if (!state.selectedNoteId) return;
+        try {
+          await state.duplicateNote(state.selectedNoteId);
+        } catch (err) {
+          await message(`Could not duplicate note: ${getErrorMessage(err)}`, { title: 'Duplicate Note', kind: 'error' });
+        }
+      },
+      trashNote: async () => {
+        const state = useStore.getState();
+        const note = state.notes.find(note => note.id === state.selectedNoteId);
+        if (!note || note.isTrashed) return;
+        try {
+          await state.deleteNote(note.id);
+        } catch (err) {
+          await message(`Could not move note to Trash: ${getErrorMessage(err)}`, { title: 'Move to Trash', kind: 'error' });
+        }
+      },
+      restoreNote: async () => {
+        const state = useStore.getState();
+        const note = state.notes.find(note => note.id === state.selectedNoteId);
+        if (!note?.isTrashed) return;
+        try {
+          await state.restoreNote(note.id);
+        } catch (err) {
+          await message(`Could not restore note: ${getErrorMessage(err)}`, { title: 'Restore Note', kind: 'error' });
         }
       },
       newLibrary: () => {
@@ -287,18 +353,13 @@ export default function App() {
       openLibrary: () => {
         void handleOpenLibrary();
       },
+      openSettings: () => {
+        useStore.getState().setSettingsOpen(true);
+      },
       importLibrary: async () => {
-        const selected = await open({
-          multiple: false,
-          title: 'Select Quiver Library (.qvlibrary)',
-          filters: [{
-            name: 'Quiver Library',
-            extensions: ['qvlibrary']
-          }]
-        });
-        if (!selected) return;
-
         try {
+          const selected = await invoke<string | null>('select_quiver_library');
+          if (!selected) return;
           // Scan for duplicates first
           setImportProgress({
             phase: 'scanning',
@@ -357,25 +418,8 @@ export default function App() {
           setImportProgress(null);
           await useStore.getState().loadData(activeLibrary.dbPath);
 
-          // Format result message
-          let msg = `Successfully imported ${result.notesImported} notes from ${result.notebooks} notebooks.`;
-          if (result.notebooksSkipped > 0) {
-            msg += `\n\nSkipped ${result.notebooksSkipped} duplicate notebook(s).`;
-          }
-          if (result.notesFailed > 0) {
-            msg += `\n\nFailed to import ${result.notesFailed} notes:`;
-            for (const err of result.errors.slice(0, 10)) {
-              msg += `\n• "${err.noteTitle}": ${err.error}`;
-            }
-            if (result.errors.length > 10) {
-              msg += `\n... and ${result.errors.length - 10} more errors`;
-            }
-          }
-
-          await message(msg, {
-            title: result.notesFailed > 0 ? 'Import Completed with Errors' : 'Import Completed',
-            kind: result.notesFailed > 0 ? 'warning' : 'info',
-          });
+          const summary = summarizeImport(result);
+          await message(summary.text, { title: summary.title, kind: summary.kind });
         } catch (err) {
           setImportProgress(null);
           await message(`Import failed: ${err}`, { title: 'Import Error', kind: 'error' });
@@ -446,6 +490,44 @@ export default function App() {
           }
         }
       },
+      restoreLibrary: async () => {
+        const previous = activeLibrary;
+        let startedRestore = false;
+        try {
+          const selected = await open({ title: 'Restore Notch Backup', multiple: false,
+            filters: [{ name: 'Notch JSON backup', extensions: ['json'] }] });
+          if (typeof selected !== 'string') return;
+          const snapshot = parseLibraryBackup(await readTextFile(selected));
+          const destination = await save({ title: 'Restore into a New Library',
+            defaultPath: 'Restored Library.notch', filters: [{ name: 'Notch Library', extensions: ['notch'] }] });
+          if (!destination) return;
+          startedRestore = true;
+          setLoading(true);
+          const name = destination.split('/').pop()?.replace(/\.notch$/i, '') || 'Restored Library';
+          const restored = await createLibrary(name, destination);
+          await initDatabase(restored.dbPath);
+          await restoreLibrarySnapshot(snapshot);
+          await activateLibrary(restored);
+          await message(`Restored ${snapshot.notes.length} notes, including Trash, and ${snapshot.resources.length} resources into ${name}.`, { title: 'Backup Restored' });
+        } catch (err) {
+          // A failed restore cannot replace the active library or its contents.
+          let recoveryError = '';
+          try {
+            if (startedRestore && previous) {
+              setActiveLibraryId(previous.id);
+              setActiveLibrary(previous.id);
+              setLibraries(getLibraries());
+              await loadData(previous.dbPath);
+            }
+          } catch (rollbackError) {
+            recoveryError = `\nThe previous library could not be reopened: ${getErrorMessage(rollbackError)}`;
+            setError(recoveryError.trim());
+          } finally {
+            setLoading(false);
+          }
+          await message(`Could not restore backup: ${getErrorMessage(err)}${recoveryError}`, { title: 'Restore Failed', kind: 'error' });
+        }
+      },
       searchAllNotes: () => {
         setShowSearch(true);
         setShowFindBar(false);
@@ -466,8 +548,8 @@ export default function App() {
       checkForUpdates: () => {
         void checkForUpdates(false);
       },
-    };
-  }, [activeLibrary, handleCreateLibrary, handleOpenLibrary, loadData]);
+    }, () => window.dispatchEvent(new Event('notch-dismiss-menus')));
+  }, [activeLibrary, activateLibrary, handleCreateLibrary, handleOpenLibrary, loadData]);
 
   // Quietly check for updates shortly after launch.
   useEffect(() => {
@@ -726,6 +808,9 @@ export default function App() {
   useEffect(() => {
     // Setup keyboard shortcuts
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Keep app navigation shortcuts from acting on notes behind a dialog.
+      if (useStore.getState().settingsOpen || document.querySelector('[role="dialog"], .library-dialog-overlay')) return;
+      if (e.metaKey || e.ctrlKey) window.dispatchEvent(new Event('notch-dismiss-menus'));
       // Cmd+Z: Undo (let browser handle it for contentEditable)
       if (e.metaKey && e.key === 'z' && !e.shiftKey) {
         const target = e.target as HTMLElement | null;
@@ -764,6 +849,16 @@ export default function App() {
       if (e.metaKey && e.key === '0') {
         e.preventDefault();
         useStore.getState().toggleSidebar();
+      }
+      // Cmd+J: Toggle assistant
+      if (e.metaKey && e.key === 'j') {
+        e.preventDefault();
+        useStore.getState().toggleAssistant();
+      }
+      // Cmd+,: Open settings
+      if (e.metaKey && e.key === ',') {
+        e.preventDefault();
+        useStore.getState().setSettingsOpen(true);
       }
       // Cmd+4: Editor only
       if (e.metaKey && e.key === '4') {
@@ -833,10 +928,11 @@ export default function App() {
   const appStyle = {
     '--sidebar-width': `${sidebarWidth}px`,
     '--notelist-width': `${noteListWidth}px`,
+    '--assistant-width': `${assistantWidth}px`,
   } as CSSProperties;
 
   return (
-    <div className="app" style={appStyle}>
+    <div className={`app${assistantVisible ? ' assistant-open' : ''}`} style={appStyle}>
       {sidebarVisible && layoutMode === 'triple' && (
         <>
           <Sidebar
@@ -846,6 +942,7 @@ export default function App() {
             onCreateLibrary={handleCreateLibrary}
             onRenameLibrary={handleRenameLibrary}
             onOpenLibrary={handleOpenLibrary}
+            onOpenSettings={() => useStore.getState().setSettingsOpen(true)}
           />
           <div
             className="column-resizer"
@@ -874,7 +971,24 @@ export default function App() {
         </>
       )}
       <NoteEditor showFindBar={showFindBar} onCloseFindBar={() => setShowFindBar(false)} />
+      {assistantVisible && (
+        <>
+          <div
+            className="column-resizer"
+            role="separator"
+            aria-label="Resize assistant panel"
+            aria-orientation="vertical"
+            onPointerDown={e => startColumnResize('assistant', e)}
+          />
+          <div className="assistant-column">
+            <Suspense fallback={<div className="assistant-loading">Loading assistant…</div>}>
+              <AssistantPanel />
+            </Suspense>
+          </div>
+        </>
+      )}
       {showSearch && <SearchOverlay onClose={() => setShowSearch(false)} />}
+      <SettingsModal />
       {isCreateLibraryOpen && (
         <div className="library-dialog-overlay" onClick={closeCreateLibraryDialog}>
           <form className="library-dialog" onSubmit={handleCreateLibrarySubmit} onClick={e => e.stopPropagation()}>

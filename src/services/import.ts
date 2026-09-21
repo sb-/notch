@@ -76,9 +76,28 @@ export interface ImportError {
 export interface ImportResult {
   notebooks: number;
   notebooksSkipped: number;
+  notebooksFailed: number;
   notesImported: number;
   notesFailed: number;
   errors: ImportError[];
+}
+
+export function summarizeImport(result: ImportResult): { title: string; text: string; kind: 'info' | 'warning' | 'error' } {
+  const hasErrors = result.errors.length > 0;
+  const importedAnything = result.notebooks > 0 || result.notesImported > 0;
+  const title = hasErrors ? (importedAnything ? 'Import Completed with Errors' : 'Import Failed') : 'Import Completed';
+  let text = importedAnything
+    ? `Imported ${result.notesImported} ${result.notesImported === 1 ? 'note' : 'notes'} from ${result.notebooks} ${result.notebooks === 1 ? 'notebook' : 'notebooks'}.`
+    : 'No notes or notebooks were imported.';
+  if (result.notebooksSkipped) text += `\n\nSkipped ${result.notebooksSkipped} duplicate ${result.notebooksSkipped === 1 ? 'notebook' : 'notebooks'}.`;
+  if (hasErrors) {
+    text += '\n\nSome items could not be read or imported:';
+    for (const error of result.errors.slice(0, 10)) {
+      text += `\n• ${error.noteTitle}: ${error.error}\n  ${error.notePath}`;
+    }
+    if (result.errors.length > 10) text += `\n… and ${result.errors.length - 10} more errors.`;
+  }
+  return { title, text, kind: hasErrors ? (importedAnything ? 'warning' : 'error') : 'info' };
 }
 
 export interface DuplicateInfo {
@@ -98,27 +117,23 @@ export async function scanForDuplicates(libraryPath: string): Promise<DuplicateI
   const duplicateNames: string[] = [];
   let totalNotebooks = 0;
 
-  try {
-    const entries = await readDir(libraryPath);
+  const entries = await readDir(libraryPath);
 
-    for (const entry of entries) {
-      if (entry.isDirectory && entry.name.endsWith('.qvnotebook')) {
-        totalNotebooks++;
-        try {
-          const metaPath = `${libraryPath}/${entry.name}/meta.json`;
-          const metaContent = await readTextFile(metaPath);
-          const meta: QuiverNotebookMeta = JSON.parse(metaContent);
+  for (const entry of entries) {
+    if (entry.isDirectory && entry.name.endsWith('.qvnotebook')) {
+      totalNotebooks++;
+      try {
+        const metaPath = `${libraryPath}/${entry.name}/meta.json`;
+        const metaContent = await readTextFile(metaPath);
+        const meta: QuiverNotebookMeta = JSON.parse(metaContent);
 
-          if (existingNames.has(meta.name.toLowerCase())) {
-            duplicateNames.push(meta.name);
-          }
-        } catch {
-          // Skip notebooks we can't read
+        if (existingNames.has(meta.name.toLowerCase())) {
+          duplicateNames.push(meta.name);
         }
+      } catch {
+        // Skip notebooks we can't read
       }
     }
-  } catch {
-    // Return empty if we can't read the library
   }
 
   return {
@@ -201,6 +216,7 @@ export async function importQuiverLibrary(
   const result: ImportResult = {
     notebooks: 0,
     notebooksSkipped: 0,
+    notebooksFailed: 0,
     notesImported: 0,
     notesFailed: 0,
     errors: [],
@@ -227,6 +243,10 @@ export async function importQuiverLibrary(
       entry => entry.isDirectory && entry.name.endsWith('.qvnotebook')
     );
 
+    if (notebookEntries.length === 0) {
+      throw new Error('No .qvnotebook folders were found. Select a Quiver library containing notebooks.');
+    }
+
     progress.notebooksTotal = notebookEntries.length;
     onProgress?.(progress);
 
@@ -239,6 +259,9 @@ export async function importQuiverLibrary(
       try {
         const metaContent = await readTextFile(`${notebookPath}/meta.json`);
         const meta: QuiverNotebookMeta = JSON.parse(metaContent);
+        if (typeof meta.uuid !== 'string' || !meta.uuid || typeof meta.name !== 'string' || !meta.name.trim()) {
+          throw new Error('Notebook metadata must contain a name and UUID.');
+        }
         notebooksByUuid.set(meta.uuid, { path: notebookPath, meta, parentUuid: null });
 
         // Track children references from individual notebook meta
@@ -247,8 +270,9 @@ export async function importQuiverLibrary(
             childToParent.set(childUuid, meta.uuid);
           }
         }
-      } catch {
-        // Skip notebooks we can't read metadata for
+      } catch (error) {
+        result.notebooksFailed++;
+        result.errors.push({ noteTitle: entry.name, notePath: `${notebookPath}/meta.json`, error: String(error) });
       }
     }
 
@@ -301,11 +325,14 @@ export async function importQuiverLibrary(
     // Sort notebooks so parents are imported before children (topological sort)
     const sortedNotebooks: NotebookScanInfo[] = [];
     const visited = new Set<string>();
+    const visiting = new Set<string>();
 
     const visit = (uuid: string) => {
       if (visited.has(uuid)) return;
       const info = notebooksByUuid.get(uuid);
       if (!info) return;
+      if (visiting.has(uuid)) throw new Error(`Notebook hierarchy contains a cycle near "${info.meta.name}".`);
+      visiting.add(uuid);
 
       // Visit parent first if it exists
       if (info.parentUuid && notebooksByUuid.has(info.parentUuid)) {
@@ -313,6 +340,7 @@ export async function importQuiverLibrary(
       }
 
       visited.add(uuid);
+      visiting.delete(uuid);
       sortedNotebooks.push(info);
     };
 
@@ -362,7 +390,8 @@ export async function importQuiverLibrary(
           uuidToNotebookId.set(info.meta.uuid, notebookResult.notebookId);
         }
 
-        result.notebooks++;
+        if (notebookResult.notebookId) result.notebooks++;
+        else result.notebooksFailed++;
         result.notesImported += notebookResult.notesImported;
         result.notesFailed += notebookResult.notesFailed;
         result.errors.push(...notebookResult.errors);
@@ -370,6 +399,7 @@ export async function importQuiverLibrary(
         progress.notesCompleted += notebookResult.notesImported + notebookResult.notesFailed;
         onProgress?.(progress);
       } catch (err) {
+        result.notebooksFailed++;
         result.errors.push({
           noteTitle: info.meta.name,
           notePath: info.path,
@@ -429,15 +459,15 @@ async function importQuiverNotebook(
     const metaContent = await readTextFile(metaPath);
     const meta: QuiverNotebookMeta = JSON.parse(metaContent);
 
-    // Create the notebook in our database with optional parent
-    const notebook = await db.createNotebook(meta.name, parentId);
-    result.notebookId = notebook.id;
-
     // Read all .qvnote directories
     const entries = await readDir(notebookPath);
     const noteEntries = entries.filter(
       entry => entry.isDirectory && entry.name.endsWith('.qvnote')
     );
+
+    // Confirm the folder is readable before creating a destination notebook.
+    const notebook = await db.createNotebook(meta.name, parentId);
+    result.notebookId = notebook.id;
 
     for (let i = 0; i < noteEntries.length; i++) {
       const entry = noteEntries[i];
@@ -466,7 +496,7 @@ async function importQuiverNotebook(
         result.notesFailed++;
         result.errors.push({
           noteTitle,
-          notePath: entry.name,
+          notePath,
           error: String(err),
         });
       }
@@ -495,72 +525,72 @@ async function importQuiverNote(notePath: string, notebookId: string): Promise<v
   const contentPath = `${notePath}/content.json`;
   const contentStr = await readTextFile(contentPath);
   const content: QuiverNoteContent = JSON.parse(sanitizeJsonString(contentStr));
+  if (!Array.isArray(content.cells) || content.cells.some(cell => typeof cell.data !== 'string')) {
+    throw new Error('Note content must contain an array of text cells.');
+  }
 
   // Create the note with the original Quiver UUID for cross-reference links
   const note = await db.createNote(notebookId, content.title || meta.title, meta.uuid);
 
-  // Delete the default cell that was created
-  const existingCells = await db.getCellsByNote(note.id);
-  for (const cell of existingCells) {
-    await db.deleteCell(note.id, cell.id);
-  }
-
-  // Import binary resources (images, attachments) stored alongside the note.
-  const resourceIdByName = new Map<string, string>();
   try {
-    const resourceEntries = await readDir(`${notePath}/resources`);
-    for (const entry of resourceEntries) {
-      if (!entry.isFile) continue;
-      try {
+    // Delete the default cell that was created
+    const existingCells = await db.getCellsByNote(note.id);
+    for (const cell of existingCells) {
+      await db.deleteCell(note.id, cell.id);
+    }
+
+    // An absent resource directory is normal. An unreadable one is a failed
+    // import, otherwise we would report success while silently losing images.
+    const resourceIdByName = new Map<string, string>();
+    const noteEntries = await readDir(notePath);
+    if (noteEntries.some(entry => entry.name === 'resources' && entry.isDirectory)) {
+      const resourceEntries = await readDir(`${notePath}/resources`);
+      for (const entry of resourceEntries) {
+        if (!entry.isFile) continue;
         const bytes = await readFile(`${notePath}/resources/${entry.name}`);
-        const resource = await db.createResource(
-          note.id,
-          entry.name,
-          mimeForFilename(entry.name),
-          bytesToBase64(bytes)
-        );
+        const resource = await db.createResource(note.id, entry.name, mimeForFilename(entry.name), bytesToBase64(bytes));
         resourceIdByName.set(entry.name, resource.id);
-      } catch {
-        // Skip resources we can't read
       }
     }
-  } catch {
-    // Resources directory may not exist
-  }
 
-  // Create cells from Quiver content, rewriting image refs to resource URLs.
-  for (let i = 0; i < content.cells.length; i++) {
-    const quiverCell = content.cells[i];
-    const cellType = mapCellType(quiverCell.type);
+    // Create cells from Quiver content, rewriting image refs to resource URLs.
+    for (let i = 0; i < content.cells.length; i++) {
+      const quiverCell = content.cells[i];
+      const cellType = mapCellType(quiverCell.type);
 
-    const cell = await db.createCell(note.id, cellType);
+      const cell = await db.createCell(note.id, cellType);
 
-    // Update cell with data
-    await db.updateCell(note.id, cell.id, {
-      data: rewriteQuiverImageRefs(quiverCell.data, resourceIdByName),
-      language: quiverCell.language,
-      diagramType: mapDiagramType(quiverCell.diagramType),
+      // Update cell with data
+      await db.updateCell(note.id, cell.id, {
+        data: rewriteQuiverImageRefs(quiverCell.data, resourceIdByName),
+        language: quiverCell.language,
+        diagramType: mapDiagramType(quiverCell.diagramType),
+      });
+    }
+
+    // Handle tags
+    if (meta.tags && meta.tags.length > 0) {
+      for (const tagName of meta.tags) {
+        // Create or find tag
+        const tags = await db.getAllTags();
+        let tag = tags.find(t => t.name === tagName);
+        if (!tag) {
+          tag = await db.createTag(tagName);
+        }
+        await db.addTagToNote(note.id, tag.id);
+      }
+    }
+
+    // Update timestamps
+    await db.updateNote(note.id, {
+      createdAt: meta.created_at * 1000, // Quiver uses seconds
+      updatedAt: meta.updated_at * 1000,
     });
+  } catch (error) {
+    // Keep failed imports from leaving empty or partially copied notes behind.
+    await db.deleteNote(note.id, true);
+    throw error;
   }
-
-  // Handle tags
-  if (meta.tags && meta.tags.length > 0) {
-    for (const tagName of meta.tags) {
-      // Create or find tag
-      const tags = await db.getAllTags();
-      let tag = tags.find(t => t.name === tagName);
-      if (!tag) {
-        tag = await db.createTag(tagName);
-      }
-      await db.addTagToNote(note.id, tag.id);
-    }
-  }
-
-  // Update timestamps
-  await db.updateNote(note.id, {
-    createdAt: meta.created_at * 1000, // Quiver uses seconds
-    updatedAt: meta.updated_at * 1000,
-  });
 }
 
 /**

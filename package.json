@@ -1,21 +1,24 @@
 {
   "name": "notch",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "bunx tauri dev",
-    "dev:frontend": "bun run --hot src/index.ts",
+    "dev:frontend": "bun run --hot scripts/dev-frontend.ts",
     "build": "bunx tauri build",
     "build:local": "bunx tauri build --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'",
-    "build:frontend": "bun build src/index.html --outdir dist --production",
+    "build:frontend": "bun run scripts/build-frontend.ts",
     "preview": "bun run src/index.ts",
     "test": "bun test",
+    "assistant:e2e": "bun run scripts/assistant-e2e.ts",
     "tauri": "bunx tauri",
     "release": "bun run scripts/release.ts",
     "icons": "bun run scripts/generate-icons.ts && iconutil -c icns src-tauri/icons/icon.iconset -o src-tauri/icons/icon.icns"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.79.7",
+    "@earendil-works/pi-ai": "0.79.7",
     "@monaco-editor/react": "^4.6.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",

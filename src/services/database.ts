@@ -111,6 +111,20 @@ export async function initDatabase(dbPath = 'sqlite:notch.db'): Promise<void> {
     )
   `);
 
+  // A notebook removal must never destroy note content. This trigger and the
+  // recursive DELETE below run as one SQLite statement, including FK checks.
+  // Separate BEGIN/COMMIT calls are unsafe with the SQL plugin's connection pool.
+  await db.execute(`
+    CREATE TRIGGER IF NOT EXISTS preserve_notebook_notes BEFORE DELETE ON notebooks
+    BEGIN
+      SELECT CASE WHEN OLD.name = 'Inbox' THEN RAISE(ABORT, 'Inbox cannot be deleted') END;
+      SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM notebooks WHERE name = 'Inbox' AND parent_id IS NULL)
+        THEN RAISE(ABORT, 'Inbox is required to recover notes') END;
+      UPDATE notes SET notebook_id = (SELECT id FROM notebooks WHERE name = 'Inbox' AND parent_id IS NULL LIMIT 1),
+        is_trashed = 1 WHERE notebook_id = OLD.id;
+    END
+  `);
+
   // Create full-text search virtual table
   await db.execute(`
     CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
@@ -118,6 +132,10 @@ export async function initDatabase(dbPath = 'sqlite:notch.db'): Promise<void> {
       title,
       content
     )
+  `);
+  await db.execute(`
+    CREATE TRIGGER IF NOT EXISTS remove_deleted_note_fts AFTER DELETE ON notes
+    BEGIN DELETE FROM notes_fts WHERE note_id = OLD.id; END
   `);
 
   // Create indexes for better performance
@@ -319,7 +337,7 @@ export async function updateNotebook(id: string, updates: Partial<Notebook>): Pr
     fields.push('name = ?');
     values.push(updates.name);
   }
-  if (updates.parentId !== undefined) {
+  if (Object.prototype.hasOwnProperty.call(updates, 'parentId')) {
     fields.push('parent_id = ?');
     values.push(updates.parentId ?? null);
   }
@@ -336,43 +354,36 @@ export async function updateNotebook(id: string, updates: Partial<Notebook>): Pr
 }
 
 export async function deleteNotebook(id: string): Promise<void> {
-  // Delete all notes in this notebook first
-  const notes = await getNotesByNotebook(id);
-  for (const note of notes) {
-    await deleteNote(note.id, true);
-  }
-
-  // Delete child notebooks recursively
-  const children = await getDb().select<NotebookRow[]>(
-    'SELECT * FROM notebooks WHERE parent_id = ?',
-    [id]
-  );
-  for (const child of children) {
-    await deleteNotebook(child.id);
-  }
-
-  await getDb().execute('DELETE FROM notebooks WHERE id = ?', [id]);
+  await ensureInboxNotebook();
+  await getDb().execute(`
+    WITH RECURSIVE subtree(id) AS (
+      SELECT id FROM notebooks WHERE id = ?
+      UNION
+      SELECT n.id FROM notebooks n JOIN subtree s ON n.parent_id = s.id
+    )
+    DELETE FROM notebooks WHERE id IN (SELECT id FROM subtree)
+  `, [id]);
 }
 
 // ==================== NOTE OPERATIONS ====================
 
-export async function getAllNotes(): Promise<Note[]> {
+export async function getAllNotes(includeTrashed = false): Promise<Note[]> {
   const rows = await getDb().select<NoteRow[]>(
-    'SELECT * FROM notes WHERE is_trashed = 0 ORDER BY sort_order, updated_at DESC'
+    `SELECT * FROM notes ${includeTrashed ? '' : 'WHERE is_trashed = 0'} ORDER BY sort_order, updated_at DESC`
   );
   return hydrateNoteRows(rows);
 }
 
-export async function getAllNoteSummaries(): Promise<Note[]> {
+export async function getAllNoteSummaries(includeTrashed = false): Promise<Note[]> {
   const rows = await getDb().select<NoteRow[]>(
-    'SELECT * FROM notes WHERE is_trashed = 0 ORDER BY sort_order, updated_at DESC'
+    `SELECT * FROM notes ${includeTrashed ? '' : 'WHERE is_trashed = 0'} ORDER BY sort_order, updated_at DESC`
   );
   return hydrateNoteRows(rows, false);
 }
 
-export async function getNotesByNotebook(notebookId: string): Promise<Note[]> {
+export async function getNotesByNotebook(notebookId: string, includeTrashed = false): Promise<Note[]> {
   const rows = await getDb().select<NoteRow[]>(
-    'SELECT * FROM notes WHERE notebook_id = ? AND is_trashed = 0 ORDER BY sort_order, updated_at DESC',
+    `SELECT * FROM notes WHERE notebook_id = ? ${includeTrashed ? '' : 'AND is_trashed = 0'} ORDER BY sort_order, updated_at DESC`,
     [notebookId]
   );
   return hydrateNoteRows(rows);
@@ -504,9 +515,7 @@ export async function updateNote(id: string, updates: Partial<Note>): Promise<vo
 
 export async function deleteNote(id: string, permanent = false): Promise<void> {
   if (permanent) {
-    // Remove from FTS
-    await getDb().execute('DELETE FROM notes_fts WHERE note_id = ?', [id]);
-    // Delete note (cells deleted via CASCADE)
+    // Resources, cells and search entries are removed in the same statement.
     await getDb().execute('DELETE FROM notes WHERE id = ?', [id]);
   } else {
     // Soft delete (move to trash)
@@ -516,6 +525,86 @@ export async function deleteNote(id: string, permanent = false): Promise<void> {
 
 export async function restoreNote(id: string): Promise<void> {
   await updateNote(id, { isTrashed: false });
+}
+
+export async function duplicateNote(id: string): Promise<Note> {
+  const original = await getNote(id);
+  if (!original) throw new Error('Note no longer exists.');
+  const copy = await createNote(original.notebookId, `${original.title || 'Untitled'} Copy`);
+  try {
+    const resourceIds = new Map<string, string>();
+    for (const resource of await getResourcesByNote(id)) {
+      const cloned = await createResource(copy.id, resource.filename, resource.mimeType, resource.data);
+      resourceIds.set(resource.id, cloned.id);
+    }
+    for (const cell of copy.cells) await deleteCell(copy.id, cell.id);
+    for (const source of original.cells) {
+      const cell = await createCell(copy.id, source.type);
+      await updateCell(copy.id, cell.id, {
+        ...source,
+        data: source.data.replace(/notch-resource:\/\/([\w-]+)/g,
+          (match, resourceId: string) => resourceIds.has(resourceId)
+            ? `notch-resource://${resourceIds.get(resourceId)}` : match),
+      });
+    }
+    const tags = await getAllTags();
+    for (const name of original.tags) {
+      const tag = tags.find(tag => tag.name === name);
+      if (tag) await addTagToNote(copy.id, tag.id);
+    }
+    return (await getNote(copy.id))!;
+  } catch (error) {
+    // Only the newly created copy is removed if copying an attachment fails.
+    await deleteNote(copy.id, true);
+    throw error;
+  }
+}
+
+/** Restore into an empty database; a single statement makes the entire restore atomic. */
+export async function restoreLibrarySnapshot(snapshot: {
+  notebooks: Notebook[]; notes: Note[]; tags: Tag[]; resources: Resource[];
+}): Promise<void> {
+  await getDb().execute('CREATE TABLE IF NOT EXISTS library_restore_payload (payload TEXT NOT NULL)');
+  await getDb().execute(`
+    CREATE TRIGGER IF NOT EXISTS restore_library_snapshot AFTER INSERT ON library_restore_payload
+    BEGIN
+      SELECT CASE WHEN EXISTS (SELECT 1 FROM notebooks) OR EXISTS (SELECT 1 FROM notes)
+        OR EXISTS (SELECT 1 FROM tags) OR EXISTS (SELECT 1 FROM resources)
+        THEN RAISE(ABORT, 'Restore requires an empty library') END;
+      INSERT INTO notebooks (id, name, parent_id, sort_order, created_at, updated_at)
+        SELECT json_extract(value, '$.id'), json_extract(value, '$.name'),
+          json_extract(value, '$.parentId'), json_extract(value, '$.sortOrder'),
+          json_extract(value, '$.createdAt'), json_extract(value, '$.updatedAt')
+        FROM json_each(NEW.payload, '$.notebooks');
+      INSERT INTO tags (id, name)
+        SELECT json_extract(value, '$.id'), json_extract(value, '$.name')
+        FROM json_each(NEW.payload, '$.tags');
+      INSERT INTO notes (id, notebook_id, title, is_favorite, is_trashed, sort_order, created_at, updated_at, source_uuid)
+        SELECT json_extract(value, '$.id'), json_extract(value, '$.notebookId'),
+          json_extract(value, '$.title'), json_extract(value, '$.isFavorite'), json_extract(value, '$.isTrashed'),
+          json_extract(value, '$.sortOrder'), json_extract(value, '$.createdAt'),
+          json_extract(value, '$.updatedAt'), json_extract(value, '$.sourceUuid')
+        FROM json_each(NEW.payload, '$.notes');
+      INSERT INTO cells (id, note_id, type, data, language, diagram_type, sort_order)
+        SELECT json_extract(c.value, '$.id'), json_extract(n.value, '$.id'),
+          json_extract(c.value, '$.type'), json_extract(c.value, '$.data'), json_extract(c.value, '$.language'),
+          json_extract(c.value, '$.diagramType'), json_extract(c.value, '$.sortOrder')
+        FROM json_each(NEW.payload, '$.notes') n, json_each(n.value, '$.cells') c;
+      INSERT INTO note_tags (note_id, tag_id)
+        SELECT json_extract(n.value, '$.id'), t.id
+        FROM json_each(NEW.payload, '$.notes') n, json_each(n.value, '$.tags') nt
+          JOIN tags t ON t.name = nt.value;
+      INSERT INTO resources (id, note_id, filename, mime_type, data)
+        SELECT json_extract(value, '$.id'), json_extract(value, '$.noteId'),
+          json_extract(value, '$.filename'), json_extract(value, '$.mimeType'), json_extract(value, '$.data')
+        FROM json_each(NEW.payload, '$.resources');
+      INSERT INTO notes_fts (note_id, title, content)
+        SELECT n.id, n.title, COALESCE((SELECT group_concat(data, char(10)) FROM cells WHERE note_id = n.id), '')
+        FROM notes n;
+      DELETE FROM library_restore_payload;
+    END
+  `);
+  await getDb().execute('INSERT INTO library_restore_payload (payload) VALUES (?)', [JSON.stringify(snapshot)]);
 }
 
 export async function toggleNoteFavorite(id: string): Promise<void> {

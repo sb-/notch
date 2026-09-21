@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { useStore, useNotes, useNotebooks } from '../../store';
 import NoteListItem from './NoteListItem';
 import type { SortBy } from '../../types';
-import { getNotebookSubtreeIds } from '../../utils/notebooks';
+import { visibleNotes } from '../../utils/noteSelection';
 
 function getTitle(
   collection: string | null,
@@ -55,6 +55,7 @@ export default function NoteList({ onOpenSearch }: NoteListProps = {}) {
   const sortBy = useStore(state => state.sortBy);
   const sortOrder = useStore(state => state.sortOrder);
   const setSortBy = useStore(state => state.setSortBy);
+  const setSortOrder = useStore(state => state.setSortOrder);
 
   const title = getTitle(selectedCollection, selectedNotebookId, selectedTagId, notebooks, tags);
 
@@ -64,66 +65,7 @@ export default function NoteList({ onOpenSearch }: NoteListProps = {}) {
 
   // Filter and sort notes
   const displayNotes = useMemo(() => {
-    let filtered = notes;
-
-    // Filter based on current selection
-    if (selectedNotebookId) {
-      const notebookIds = getNotebookSubtreeIds(notebooks, selectedNotebookId);
-      filtered = notes.filter(n => notebookIds.has(n.notebookId) && !n.isTrashed);
-    } else if (selectedTagId) {
-      const tag = tags.find(t => t.id === selectedTagId);
-      if (tag) {
-        filtered = notes.filter(n => n.tags.includes(tag.name) && !n.isTrashed);
-      }
-    } else if (selectedCollection) {
-      switch (selectedCollection) {
-        case 'all':
-          filtered = notes.filter(n => !n.isTrashed);
-          break;
-        case 'favorites':
-          filtered = notes.filter(n => n.isFavorite && !n.isTrashed);
-          break;
-        case 'recents':
-          filtered = notes
-            .filter(n => !n.isTrashed)
-            .sort((a, b) => b.updatedAt - a.updatedAt)
-            .slice(0, 50);
-          break;
-        case 'trash':
-          filtered = notes.filter(n => n.isTrashed);
-          break;
-        case 'inbox':
-          const inbox = notebooks.find(nb => nb.name === 'Inbox');
-          if (inbox) {
-            filtered = notes.filter(n => n.notebookId === inbox.id && !n.isTrashed);
-          }
-          break;
-      }
-    } else {
-      filtered = notes.filter(n => !n.isTrashed);
-    }
-
-    // Sort
-    const sorted = [...filtered].sort((a, b) => {
-      let cmp = 0;
-      switch (sortBy) {
-        case 'title':
-          cmp = a.title.localeCompare(b.title);
-          break;
-        case 'createdAt':
-          cmp = (b.createdAt || 0) - (a.createdAt || 0);
-          break;
-        case 'updatedAt':
-        default:
-          cmp = (b.updatedAt || 0) - (a.updatedAt || 0);
-          break;
-      }
-      const result = sortOrder === 'desc' ? cmp : -cmp;
-      // Stable sort by id when timestamps are equal
-      return result !== 0 ? result : a.id.localeCompare(b.id);
-    });
-
-    return sorted;
+    return visibleNotes(useStore.getState());
   }, [notes, notebooks, tags, selectedNotebookId, selectedTagId, selectedCollection, sortBy, sortOrder]);
 
   const handleCreateNote = async () => {
@@ -138,7 +80,8 @@ export default function NoteList({ onOpenSearch }: NoteListProps = {}) {
   };
 
   const handleSortChange = (newSortBy: SortBy) => {
-    setSortBy(newSortBy);
+    if (newSortBy === sortBy) setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+    else { setSortBy(newSortBy); setSortOrder(newSortBy === 'title' ? 'asc' : 'desc'); }
     setShowSortMenu(false);
   };
 
@@ -170,7 +113,7 @@ export default function NoteList({ onOpenSearch }: NoteListProps = {}) {
         onClick={() => setShowSortMenu(!showSortMenu)}
         style={{ position: 'relative' }}
       >
-        Sort by {currentSortLabel} ↓
+        Sort by {currentSortLabel} {sortOrder === 'desc' ? '↓' : '↑'}
         {showSortMenu && (
           <div
             className="context-menu"

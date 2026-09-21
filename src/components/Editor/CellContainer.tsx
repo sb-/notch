@@ -12,6 +12,7 @@ interface CellContainerProps {
   noteId: string;
   cell: Cell;
   isFocused: boolean;
+  focusRequest?: number;
   onFocus: () => void;
   onDelete: () => void;
   canDelete: boolean;
@@ -23,6 +24,7 @@ export default function CellContainer({
   noteId,
   cell,
   isFocused,
+  focusRequest,
   onFocus,
   onDelete,
   canDelete,
@@ -39,8 +41,10 @@ export default function CellContainer({
     updateCell(noteId, cell.id, { diagramType });
   };
 
+  // Cells only invoke this after deciding they're empty (a text cell may still
+  // hold placeholder markup like <div><br></div>, so don't re-check data here).
   const handleBackspaceEmpty = () => {
-    if (canDelete && !cell.data.trim()) {
+    if (canDelete) {
       onDelete();
     }
   };
@@ -51,6 +55,7 @@ export default function CellContainer({
       onChange: handleDataChange,
       onFocus,
       isFocused,
+      focusRequest,
       onBackspaceEmpty: handleBackspaceEmpty,
       onNavigatePrev,
       onNavigateNext,
@@ -85,6 +90,7 @@ export default function CellContainer({
 
   return (
     <div
+      data-cell-id={cell.id}
       className={`cell cell-${cell.type} ${isFocused ? 'focused' : ''}`}
       onClick={onFocus}
     >

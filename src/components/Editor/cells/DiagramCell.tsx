@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
-import mermaid from 'mermaid';
+import React, { useState, useRef, useEffect } from 'react';
+import { renderDiagram } from '../../../services/diagrams';
 
 interface DiagramCellProps {
   data: string;
@@ -8,26 +8,11 @@ interface DiagramCellProps {
   onDiagramTypeChange: (type: 'sequence' | 'flow') => void;
   onFocus: () => void;
   isFocused?: boolean;
+  focusRequest?: number;
   onBackspaceEmpty?: () => void;
   onNavigatePrev?: () => void;
   onNavigateNext?: () => void;
 }
-
-// Initialize mermaid
-mermaid.initialize({
-  startOnLoad: false,
-  theme: 'default',
-  securityLevel: 'loose',
-  flowchart: {
-    useMaxWidth: true,
-    htmlLabels: true,
-  },
-  sequence: {
-    useMaxWidth: true,
-    diagramMarginX: 8,
-    diagramMarginY: 8,
-  },
-});
 
 const defaultDiagrams = {
   flow: `graph TD
@@ -45,63 +30,45 @@ export default function DiagramCell({
   onChange,
   onFocus,
   isFocused,
+  focusRequest,
   onBackspaceEmpty,
   onNavigatePrev,
   onNavigateNext,
 }: DiagramCellProps) {
   const [isEditing, setIsEditing] = useState(!data);
-  const wasEditing = useRef(isEditing);
   const [error, setError] = useState<string | null>(null);
   const [svg, setSvg] = useState<string>('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const diagramId = useRef(`mermaid-${Math.random().toString(36).substr(2, 9)}`);
-
-  // Render mermaid diagram
-  const renderDiagram = useMemo(() => {
-    return async (code: string) => {
-      if (!code.trim()) {
-        setSvg('');
-        setError(null);
-        return;
-      }
-
-      try {
-        // Validate the diagram syntax
-        await mermaid.parse(code);
-
-        // Render the diagram
-        const { svg: renderedSvg } = await mermaid.render(
-          diagramId.current,
-          code
-        );
-        setSvg(renderedSvg);
-        setError(null);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Invalid diagram syntax';
-        setError(message);
-        setSvg('');
-      }
-    };
-  }, []);
 
   useEffect(() => {
-    renderDiagram(data);
-  }, [data, renderDiagram]);
+    let cancelled = false;
+    setError(null);
+    if (!data.trim()) {
+      setSvg('');
+      return;
+    }
+    void renderDiagram(data, diagramType).then(renderedSvg => {
+      if (!cancelled) setSvg(renderedSvg);
+    }).catch((err: unknown) => {
+      if (!cancelled) {
+        setError(err instanceof Error ? err.message : 'Invalid diagram syntax');
+        setSvg('');
+      }
+    });
+    return () => { cancelled = true; };
+  }, [data, diagramType]);
 
   useEffect(() => {
-    if (isEditing && textareaRef.current) {
+    if (isEditing && isFocused && textareaRef.current) {
       textareaRef.current.focus();
       textareaRef.current.selectionStart = textareaRef.current.value.length;
     }
-  }, [isEditing]);
+  }, [isEditing, isFocused, focusRequest]);
 
-  // Auto-enter editing mode when cell becomes focused (for new cells)
+  // Keyboard navigation (including Return from the title) enters the source editor.
   useEffect(() => {
-    if (isFocused && !wasEditing.current && !isEditing) {
-      setIsEditing(true);
-    }
-    wasEditing.current = isEditing;
-  }, [isFocused, isEditing]);
+    if (isFocused) setIsEditing(true);
+  }, [isFocused, focusRequest]);
 
   const handleDoubleClick = () => {
     setIsEditing(true);
@@ -120,7 +87,7 @@ export default function DiagramCell({
     const textarea = textareaRef.current;
     if (!textarea) return;
 
-    if (e.key === 'Backspace' && !data.trim() && onBackspaceEmpty) {
+    if (e.key === 'Backspace' && data === '' && onBackspaceEmpty) {
       e.preventDefault();
       onBackspaceEmpty();
       return;
@@ -177,8 +144,10 @@ export default function DiagramCell({
         <textarea
           ref={textareaRef}
           className="cell-editor"
+          aria-label="Diagram cell"
           value={data}
           onChange={handleChange}
+          onFocus={onFocus}
           onBlur={handleBlur}
           onKeyDown={handleKeyDown}
           placeholder={`Enter Mermaid ${diagramType} diagram syntax...`}
@@ -241,7 +210,11 @@ export default function DiagramCell({
         justifyContent: 'center',
       }}
     >
-      {svg ? (
+      {error ? (
+        <div className="diagram-error" role="alert" style={{ color: 'var(--danger-color)', whiteSpace: 'pre-wrap' }}>
+          {error}
+        </div>
+      ) : svg ? (
         <div dangerouslySetInnerHTML={{ __html: svg }} />
       ) : (
         <span style={{ color: 'var(--text-tertiary)' }}>

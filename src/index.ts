@@ -4,9 +4,23 @@ Bun.serve({
   port: 1420,
   routes: {
     '/': index,
+    '/monaco/*': request => {
+      const path = new URL(request.url).pathname.slice('/monaco/'.length);
+      if (path.split('/').some(part => part === '..') || !path.startsWith('vs/')) {
+        return new Response('Not found', { status: 404 });
+      }
+      return new Response(Bun.file(`node_modules/monaco-editor/min/${path}`));
+    },
   },
   development: {
-    hmr: true,
+    // HMR is disabled: the optional assistant bundles LLM provider SDKs
+    // (@earendil-works/pi-ai → openai/anthropic/etc.), and the dev server does
+    // not code-split, so they land in the eager bundle. Bun's HMR transform
+    // currently emits invalid JS for one of those modules ("Invalid
+    // destructuring assignment target"), which blanks the whole app. Bun still
+    // live-reloads on save without HMR. Production builds (--splitting) are
+    // unaffected. Re-enable once the upstream Bun HMR bug is fixed.
+    hmr: false,
     console: true,
   },
 });
