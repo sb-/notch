@@ -1,4 +1,5 @@
 import { Suspense, lazy, useState, useCallback, useRef, useEffect } from 'react';
+import { flushSync } from 'react-dom';
 import { open } from '@tauri-apps/plugin-dialog';
 import { readFile } from '@tauri-apps/plugin-fs';
 import { useStore, useSelectedNote, useEditorViewMode, useNotebooks } from '../../store';
@@ -221,8 +222,14 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
       e.preventDefault();
       e.stopPropagation();
       const afterCellId = effectiveFocusedCellId || note.cells[note.cells.length - 1]?.id;
-      const newCell = await addCell(note.id, currentCellType, afterCellId);
-      if (useStore.getState().selectedNoteId === note.id) setFocusedCellId(newCell.id);
+      // Publish and focus the new input before the next native input event.
+      // Persistence continues in the background; edits wait for its insertion.
+      let insertion!: Promise<import('../../types').Cell>;
+      flushSync(() => {
+        insertion = addCell(note.id, currentCellType, afterCellId);
+        setFocusedCellId(useStore.getState().focusedCellId);
+      });
+      await insertion;
     }
   }, [note, showingPreviousNote, effectiveFocusedCellId, currentCellType, addCell]);
 
@@ -246,12 +253,19 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
       const textarea = element?.querySelector<HTMLTextAreaElement>('textarea');
       if (!textarea) return;
       const result = formatMarkdownSelection(textarea.value, textarea.selectionStart, textarea.selectionEnd, action);
-      await updateCell(note.id, focusedCell.id, { data: result.data });
-      requestAnimationFrame(() => {
-        if (!textarea.isConnected) return;
-        textarea.focus();
-        textarea.setSelectionRange(result.start, result.end);
-      });
+      // Native insertText creates a real undo transaction in WebKit. Assigning
+      // a controlled textarea value bypasses (and can clear) that history.
+      textarea.focus();
+      let start = 0;
+      while (start < textarea.value.length && textarea.value[start] === result.data[start]) start++;
+      let end = textarea.value.length;
+      let replacementEnd = result.data.length;
+      while (end > start && replacementEnd > start && textarea.value[end - 1] === result.data[replacementEnd - 1]) {
+        end--; replacementEnd--;
+      }
+      textarea.setSelectionRange(start, end);
+      document.execCommand('insertText', false, result.data.slice(start, replacementEnd));
+      textarea.setSelectionRange(result.start, result.end);
     } else if (focusedCell.type === 'text') {
       const editor = element?.querySelector<HTMLElement>('[contenteditable="true"]');
       if (!editor) return;

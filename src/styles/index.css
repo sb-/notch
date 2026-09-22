@@ -1253,7 +1253,7 @@ body {
   max-width: 100%;
 }
 
-.cell-richtext:empty::before {
+.cell-richtext[contenteditable="true"]:empty::before {
   content: 'Type here...';
   color: var(--text-tertiary);
 }
@@ -1514,6 +1514,13 @@ body {
   padding: 12px 16px;
   display: flex;
   justify-content: center;
+}
+
+/* Preserve intrinsic diagram size; only shrink diagrams that exceed the pane. */
+.diagram-preview svg {
+  max-width: 100%;
+  height: auto;
+  flex-shrink: 1;
 }
 
 /* Preview Styles */

@@ -47,6 +47,7 @@ export default function DiagramCell({
       setSvg('');
       return;
     }
+    const timer = setTimeout(() => {
     void renderDiagram(data, diagramType).then(renderedSvg => {
       if (!cancelled) setSvg(renderedSvg);
     }).catch((err: unknown) => {
@@ -55,7 +56,8 @@ export default function DiagramCell({
         setSvg('');
       }
     });
-    return () => { cancelled = true; };
+    }, 100);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [data, diagramType]);
 
   useEffect(() => {

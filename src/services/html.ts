@@ -1,11 +1,11 @@
 import createDOMPurify from 'dompurify';
 import type { Config, DOMPurify, UponSanitizeAttributeHook } from 'dompurify';
 
-const domPurify: DOMPurify = typeof createDOMPurify.sanitize === 'function'
-  ? createDOMPurify
-  : typeof window !== 'undefined'
-    ? createDOMPurify(window)
-    : createDOMPurify;
+// Keep rich-text policy private: Mermaid also uses DOMPurify, and installing
+// these hooks on its singleton strips SVG dimensions and layout styles.
+const domPurify: DOMPurify = typeof window !== 'undefined'
+  ? createDOMPurify(window)
+  : createDOMPurify;
 
 const STYLE_VALUE_BLOCKLIST = /(?:url\s*\(|expression\s*\(|-moz-binding|@import|[<>{}])/i;
 const TEXT_ALIGN_VALUES = new Set(['left', 'right', 'center', 'justify', 'start', 'end']);

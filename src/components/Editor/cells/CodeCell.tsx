@@ -75,6 +75,7 @@ export default function CodeCell({
   const [editorHeight, setEditorHeight] = useState(MIN_EDITOR_HEIGHT);
   const [editorReady, setEditorReady] = useState(false);
   const [loadError, setLoadError] = useState(false);
+  const pendingInputRef = useRef<HTMLTextAreaElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof Monaco | null>(null);
@@ -121,7 +122,10 @@ export default function CodeCell({
       const { clientWidth: width, clientHeight: height } = container;
       if (width <= 0 || height <= 0) return;
 
-      model = monaco.editor.createModel(latest.current.data, toMonacoLanguage(latest.current.language));
+      const pending = pendingInputRef.current;
+      const transferFocus = pending === document.activeElement;
+      const selection = pending ? [pending.selectionStart, pending.selectionEnd] : null;
+      model = monaco.editor.createModel(pending?.value ?? latest.current.data, toMonacoLanguage(latest.current.language));
       // Create directly in the visible, measured host. The React wrapper creates
       // Monaco inside display:none, which WKWebView can leave at its 5×5 minimum
       // until a native window resize, even when the outer container is correct.
@@ -157,7 +161,15 @@ export default function CodeCell({
       syncEditorHeight(editor);
       setEditorReady(true);
       layoutEditor();
-      if (latest.current.isFocused) editor.focus();
+      if (transferFocus) {
+        if (selection) {
+          const start = model.getPositionAt(selection[0]);
+          const end = model.getPositionAt(selection[1]);
+          editor.setSelection({ startLineNumber: start.lineNumber, startColumn: start.column,
+            endLineNumber: end.lineNumber, endColumn: end.column });
+        }
+        editor.focus();
+      }
     };
 
     const observer = new ResizeObserver(() => {
@@ -206,8 +218,8 @@ export default function CodeCell({
       } finally {
         applyingExternalValue.current = false;
       }
+      layoutEditor();
     }
-    layoutEditor();
   }, [data, editorReady, layoutEditor]);
 
   useEffect(() => {
@@ -218,17 +230,28 @@ export default function CodeCell({
     }
   }, [language, editorReady]);
 
-  useEffect(() => {
-    if (isFocused) editorRef.current?.focus();
-  }, [isFocused, focusRequest, editorReady]);
+  useLayoutEffect(() => {
+    if (isFocused) {
+      if (editorRef.current) editorRef.current.focus();
+      else pendingInputRef.current?.focus();
+    }
+  }, [isFocused, focusRequest]);
 
   return (
     <div className="code-cell-wrapper" style={{ position: 'relative' }}>
       <div ref={containerRef} className="monaco-container" style={{ height: editorHeight + 'px' }} />
       {!editorReady && (
-        <div className="cell-loading" role={loadError ? 'alert' : 'status'} style={{ position: 'absolute', inset: 0 }}>
-          {loadError ? 'Unable to load code editor.' : 'Loading code editor…'}
-        </div>
+        <textarea
+          ref={pendingInputRef}
+          aria-label="Code cell"
+          className="cell-editor"
+          style={{ position: 'absolute', inset: 0 }}
+          value={data}
+          onChange={event => onChange(event.target.value)}
+          onFocus={onFocus}
+          spellCheck={false}
+          placeholder={loadError ? 'Code editor unavailable; plain-text editing is active.' : ''}
+        />
       )}
     </div>
   );

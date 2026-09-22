@@ -195,3 +195,21 @@ expect(summarizeImport(failedImport).text).toContain('Attachment access denied')
 expect(await db.getAllNotes(true)).toEqual([]);
 expect(connection!.query('SELECT * FROM resources').all()).toEqual([]);
 console.log('PASS Quiver images import intact and attachment failures report diagnostics without partial notes');
+
+// A native insertion must expose a writable cell before the SQL round trips
+// finish. Immediate edits and a second insertion must persist in the same order.
+await useStore.getState().loadData('sqlite:rapid-insertion');
+const rapid = await useStore.getState().createNote(useStore.getState().notebooks.find(n => n.name === 'Inbox')!.id, 'Rapid input');
+const firstInsertion = useStore.getState().addCell(rapid.id, 'code', rapid.cells[0].id);
+const firstId = useStore.getState().focusedCellId!;
+expect(firstId).not.toBe(rapid.cells[0].id);
+expect(useStore.getState().notes.find(n => n.id === rapid.id)!.cells).toHaveLength(2);
+const firstEdit = useStore.getState().updateCell(rapid.id, firstId, { data: 'immediate first' });
+const secondInsertion = useStore.getState().addCell(rapid.id, 'code', firstId);
+const secondId = useStore.getState().focusedCellId!;
+const secondEdit = useStore.getState().updateCell(rapid.id, secondId, { data: 'immediate second' });
+await Promise.all([firstInsertion, firstEdit, secondInsertion, secondEdit]);
+const savedRapid = (await db.getNote(rapid.id))!;
+expect(savedRapid.cells.map(c => c.data)).toEqual(['', 'immediate first', 'immediate second']);
+expect(savedRapid.cells.map(c => c.sortOrder)).toEqual([0, 1, 2]);
+console.log('PASS immediate insertion and rapid edits persist in order');

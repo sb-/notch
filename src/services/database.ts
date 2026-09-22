@@ -627,9 +627,9 @@ export async function getCellsByNote(noteId: string): Promise<Cell[]> {
 export async function createCell(
   noteId: string,
   type: CellType,
-  afterCellId?: string
+  afterCellId?: string,
+  id = uuid()
 ): Promise<Cell> {
-  const id = uuid();
 
   // Determine sort order
   let sortOrder: number;

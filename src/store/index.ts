@@ -1,3 +1,4 @@
+import { v4 as uuid } from 'uuid';
 import { create } from 'zustand';
 import type {
   Notebook,
@@ -20,6 +21,8 @@ import { preferencesChanged, readPreferences, savePreferences } from './preferen
 type Store = AppState & AppActions;
 
 const conversionUndoStack: { noteId: string; cell: Cell }[] = [];
+// Per-note insertion barriers keep rapid insertions and edits ordered on disk.
+const pendingCellInsertions = new Map<string, Promise<unknown>>();
 const noteBodyLoadPromises = new Map<string, Promise<void>>();
 let currentLibraryPath: string | null = null;
 
@@ -221,26 +224,32 @@ export const useStore = create<Store>((set, get) => ({
   // ==================== CELL ACTIONS ====================
 
   addCell: async (noteId: string, type: CellType, afterCellId?: string) => {
-    const cell = await db.createCell(noteId, type, afterCellId);
+    const note = get().notes.find(n => n.id === noteId);
+    const index = afterCellId ? (note?.cells.findIndex(c => c.id === afterCellId) ?? -1) + 1 : note?.cells.length ?? 0;
+    const cell: Cell = { id: uuid(), type, data: '', sortOrder: index,
+      language: type === 'code' ? 'javascript' : undefined,
+      diagramType: type === 'diagram' ? 'flow' : undefined };
+    const previous = pendingCellInsertions.get(noteId);
+    const insertion = (async () => {
+      if (previous) await previous;
+      return db.createCell(noteId, type, afterCellId, cell.id);
+    })();
+    pendingCellInsertions.set(noteId, insertion);
     set(state => ({
+      focusedCellId: state.selectedNoteId === noteId ? cell.id : state.focusedCellId,
       notes: state.notes.map(n => {
         if (n.id !== noteId) return n;
-
         const cells = [...n.cells];
-        if (afterCellId) {
-          const afterIndex = cells.findIndex(c => c.id === afterCellId);
-          cells.splice(afterIndex + 1, 0, cell);
-        } else {
-          cells.push(cell);
-        }
-
-        // Re-index sort orders
-        cells.forEach((c, i) => (c.sortOrder = i));
-
-        return { ...n, cells };
+        cells.splice(index, 0, cell);
+        return { ...n, cells: cells.map((c, i) => ({ ...c, sortOrder: i })) };
       }),
     }));
-    return cell;
+    try {
+      await insertion;
+      return cell;
+    } finally {
+      if (pendingCellInsertions.get(noteId) === insertion) pendingCellInsertions.delete(noteId);
+    }
   },
 
   updateCell: async (noteId: string, cellId: string, updates: Partial<Cell>) => {
@@ -257,10 +266,12 @@ export const useStore = create<Store>((set, get) => ({
         };
       }),
     }));
+    await pendingCellInsertions.get(noteId);
     await db.updateCell(noteId, cellId, updates);
   },
 
   deleteCell: async (noteId: string, cellId: string) => {
+    await pendingCellInsertions.get(noteId);
     await db.deleteCell(noteId, cellId);
     set(state => ({
       notes: state.notes.map(n => {
@@ -273,6 +284,7 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   moveCell: async (noteId: string, cellId: string, newIndex: number) => {
+    await pendingCellInsertions.get(noteId);
     await db.moveCell(noteId, cellId, newIndex);
     set(state => ({
       notes: state.notes.map(n => {
@@ -296,6 +308,7 @@ export const useStore = create<Store>((set, get) => ({
       .notes.find(n => n.id === noteId)
       ?.cells.find(c => c.id === cellId);
 
+    await pendingCellInsertions.get(noteId);
     const convertedCell = await db.convertCell(noteId, cellId, newType);
     if (!convertedCell) return;
 
