@@ -1,6 +1,6 @@
 [package]
 name = "notch"
-version = "0.3.0"
+version = "0.3.1"
 description = "A programmer's notebook app"
 authors = ["Notch Contributors"]
 edition = "2021"

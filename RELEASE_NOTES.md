@@ -1,6 +1,18 @@
-# Notch 0.3.0
+# Notch 0.3.1
 
-This release improves native editing, data recovery, and compatibility with imported Quiver notes.
+This release fixes editing regressions and makes live previews more responsive. It also includes the native editing, recovery, and Quiver compatibility improvements from the unpublished 0.3.0 draft.
+
+## New in 0.3.1
+
+- Fix immediate typing or paste after Shift+Return landing in the previous code cell. New inputs are available immediately, with ordered background persistence.
+- Restore native Undo and Redo for Markdown toolbar formatting.
+- Keep small flowcharts at their natural size instead of enlarging them across multiple screens.
+- Hide the empty text-cell editing prompt from read-only previews.
+- Update only changed preview cells, reuse diagram renders, and avoid unnecessary code-editor layouts on each keystroke.
+- In a controlled preview benchmark with 20 code cells, median update work fell from about 5 ms to 0.2–0.3 ms. This measures preview rendering, not total application latency or performance relative to Quiver.
+- Add a local-build command that skips updater artifacts.
+
+## Also included since 0.2.1
 
 ## Editing and navigation
 
@@ -28,6 +40,6 @@ This release improves native editing, data recovery, and compatibility with impo
 
 ## Verification and known limits
 
-111 automated tests pass, including SQLite recovery and backup round trips. Native macOS testing verified code editing and Undo/Redo, note duplication and recovery, inline images, settings, responsive layout, search, all 12 Quiver tutorial imports, and a backup restoration of 18 notes with 17 byte-identical resources.
+113 automated tests pass, including SQLite recovery, backup round trips, rapid insertion persistence, and render-cache behavior. Native retesting verified all four 0.3.1 fixes in an optimized macOS package. Native macOS testing verified code editing and Undo/Redo, note duplication and recovery, inline images, settings, responsive layout, search, all 12 Quiver tutorial imports, and a backup restoration of 18 notes with 17 byte-identical resources.
 
 This release does not provide complete Quiver feature parity. Floating previews, presentation mode, arbitrary attachments, additional export formats such as PDF/PNG, and shared file-based synchronization remain separate work. Complex legacy diagram syntax outside the supported subset displays an explanatory error. Signed-release installation, updater installation, and enabled assistant conversations were not part of the native fix verification.
