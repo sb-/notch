@@ -27,9 +27,12 @@ const renderSource = asyncCache(async (code: string) => {
   }
 });
 
-export async function renderDiagram(source: string, type: 'flow' | 'sequence' = 'flow'): Promise<string> {
+export async function renderDiagram(source: string, type: 'flow' | 'sequence' = 'flow', appearance: 'dark' | 'light' = 'dark'): Promise<string> {
   if (!source.trim()) return '';
-  const { svg, id } = await renderSource(diagramSource(source, type));
+  const code = diagramSource(source, type);
+  const { svg, id } = await renderSource(appearance === 'light'
+    ? '%%{init: {"theme":"default","themeVariables":{"lineColor":"#333333","signalColor":"#333333","primaryTextColor":"#222222"}}}%%\n' + code
+    : code);
   // Cached markup can appear in editor and preview together: keep SVG IDs unique.
   return svg.replaceAll(id, `notch-diagram-${++nextId}`);
 }

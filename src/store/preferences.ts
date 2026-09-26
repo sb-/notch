@@ -1,6 +1,6 @@
 import type { AppState } from '../types';
 
-const fields = ['layoutMode', 'editorViewMode', 'sidebarVisible', 'sortBy', 'sortOrder',
+const fields = ['scrollSync', 'layoutMode', 'editorViewMode', 'sidebarVisible', 'sortBy', 'sortOrder',
   'selectedCollection', 'selectedNotebookId', 'selectedTagId', 'selectedNoteId'] as const;
 type Preferences = Pick<AppState, typeof fields[number]>;
 
@@ -8,6 +8,7 @@ export function readPreferences(path: string): Partial<Preferences> {
   try {
     const value = JSON.parse(localStorage.getItem(`notch.view.${path}`) || '{}');
     const result: Partial<Preferences> = {};
+    if (typeof value.scrollSync === 'boolean') result.scrollSync = value.scrollSync;
     if (['single', 'double', 'triple'].includes(value.layoutMode)) result.layoutMode = value.layoutMode;
     if (['editor', 'preview', 'split'].includes(value.editorViewMode)) result.editorViewMode = value.editorViewMode;
     if (typeof value.sidebarVisible === 'boolean') result.sidebarVisible = value.sidebarVisible;

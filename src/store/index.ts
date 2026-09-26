@@ -20,14 +20,39 @@ import { preferencesChanged, readPreferences, savePreferences } from './preferen
 
 type Store = AppState & AppActions;
 
-const conversionUndoStack: { noteId: string; cell: Cell }[] = [];
+type CellChange = { noteId: string; before: Cell[]; after: Cell[]; focusBefore: string | null; focusAfter: string | null };
+const cellUndo = new Map<string, CellChange[]>();
+const cellRedo = new Map<string, CellChange[]>();
+let navigatingHistory = false;
+export function hasCellHistory(noteId: string, redo = false): boolean {
+  return Boolean((redo ? cellRedo : cellUndo).get(noteId)?.length);
+}
+const cloneCells = (cells: Cell[]) => cells.map(cell => ({ ...cell }));
+function rememberCellChange(change: CellChange): void {
+  const stack = cellUndo.get(change.noteId) ?? [];
+  stack.push(change);
+  if (stack.length > 100) stack.shift();
+  cellUndo.set(change.noteId, stack);
+  cellRedo.delete(change.noteId);
+}
+
 // Per-note insertion barriers keep rapid insertions and edits ordered on disk.
 const pendingCellInsertions = new Map<string, Promise<unknown>>();
 const noteBodyLoadPromises = new Map<string, Promise<void>>();
 let currentLibraryPath: string | null = null;
 
+export async function flushPendingChanges(): Promise<void> {
+  await Promise.all([...pendingCellInsertions.values()]);
+  await db.flushSearchIndex();
+}
+
 export const useStore = create<Store>((set, get) => ({
   // Initial UI state
+  scrollSync: false,
+  navigationHistory: [],
+  navigationIndex: -1,
+  cellHistoryVersion: 0,
+  lastChangeWasStructural: false,
   layoutMode: 'triple',
   editorViewMode: 'split',
   sidebarVisible: true,
@@ -56,6 +81,81 @@ export const useStore = create<Store>((set, get) => ({
   sortOrder: 'desc',
 
   // ==================== LAYOUT ACTIONS ====================
+
+  toggleScrollSync: () => set(state => ({ scrollSync: !state.scrollSync })),
+  navigateHistory: async (direction) => {
+    const state = get();
+    let index = state.navigationIndex + direction;
+    while (index >= 0 && index < state.navigationHistory.length) {
+      const note = state.notes.find(n => n.id === state.navigationHistory[index] && !n.isTrashed);
+      if (note) {
+        navigatingHistory = true;
+        set({ navigationIndex: index, selectedNoteId: note.id, selectedNotebookId: note.notebookId,
+          selectedCollection: null, selectedTagId: null, focusedCellId: null, lastChangeWasStructural: false });
+        navigatingHistory = false;
+        await get().loadNoteBody(note.id);
+        return;
+      }
+      index += direction;
+    }
+  },
+  changeCells: async (noteId, cells, focusId) => {
+    const state = get();
+    const note = state.notes.find(n => n.id === noteId);
+    if (!note || !cells.length) return;
+    const next = cells.map((cell, sortOrder) => ({ ...cell, sortOrder }));
+    rememberCellChange({ noteId, before: cloneCells(note.cells), after: cloneCells(next),
+      focusBefore: state.focusedCellId, focusAfter: focusId ?? next[0].id });
+    set({ notes: state.notes.map(n => n.id === noteId ? { ...n, cells: next, updatedAt: Date.now() } : n),
+      focusedCellId: focusId ?? next[0].id, cellHistoryVersion: state.cellHistoryVersion + 1, lastChangeWasStructural: true });
+    const previous = pendingCellInsertions.get(noteId);
+    const work = (async () => { await previous; await db.replaceNoteCells(noteId, next); })();
+    pendingCellInsertions.set(noteId, work);
+    try { await work; }
+    catch (error) {
+      if (pendingCellInsertions.get(noteId) === work) {
+        const saved = await db.getNote(noteId);
+        cellUndo.delete(noteId); cellRedo.delete(noteId);
+        set(current => ({ notes: current.notes.map(n => n.id === noteId && saved ? saved : n),
+          cellHistoryVersion: current.cellHistoryVersion + 1, lastChangeWasStructural: false }));
+      }
+      throw error;
+    } finally { if (pendingCellInsertions.get(noteId) === work) pendingCellInsertions.delete(noteId); }
+  },
+  undoCellChange: async (redo = false) => {
+    const id = get().selectedNoteId;
+    if (!id) return false;
+    const previous = pendingCellInsertions.get(id);
+    const work = (async () => {
+      await previous;
+      const source = redo ? cellRedo : cellUndo;
+      const target = redo ? cellUndo : cellRedo;
+      const change = source.get(id)?.at(-1);
+      if (!change) return false;
+      const currentCells = cloneCells(get().notes.find(n => n.id === id)!.cells);
+      const cells = cloneCells(redo ? change.after : change.before);
+      // Preserve edits in cells that the structural operation did not change.
+      for (let i = 0; i < cells.length; i++) {
+        const before = change.before.find(c => c.id === cells[i].id);
+        const after = change.after.find(c => c.id === cells[i].id);
+        const current = currentCells.find(c => c.id === cells[i].id);
+        if (before && after && current && before.data === after.data && before.type === after.type) {
+          cells[i] = { ...current, sortOrder: i };
+        }
+      }
+      await db.replaceNoteCells(id, cells);
+      if (redo) change.before = currentCells; else change.after = currentCells;
+      source.get(id)!.pop();
+      target.set(id, [...(target.get(id) ?? []), change]);
+      set(current => ({ notes: current.notes.map(n => n.id === id ? { ...n, cells, updatedAt: Date.now() } : n),
+        focusedCellId: redo ? change.focusAfter : change.focusBefore,
+        cellHistoryVersion: current.cellHistoryVersion + 1, lastChangeWasStructural: true }));
+      return true;
+    })();
+    pendingCellInsertions.set(id, work);
+    try { return await work; }
+    finally { if (pendingCellInsertions.get(id) === work) pendingCellInsertions.delete(id); }
+  },
 
   setLayoutMode: (mode: LayoutMode) => set({ layoutMode: mode }),
 
@@ -90,8 +190,10 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
 
-  selectNote: async (id: string | null) => {
-    set({ selectedNoteId: id });
+  selectNote: async (id: string | null, revealNotebook = false) => {
+    const note = revealNotebook ? get().notes.find(n => n.id === id) : undefined;
+    set({ selectedNoteId: id, ...(note ? { selectedNotebookId: note.notebookId,
+      selectedCollection: null, selectedTagId: null } : {}) });
     if (id) {
       await get().loadNoteBody(id);
     }
@@ -229,6 +331,11 @@ export const useStore = create<Store>((set, get) => ({
     const cell: Cell = { id: uuid(), type, data: '', sortOrder: index,
       language: type === 'code' ? 'javascript' : undefined,
       diagramType: type === 'diagram' ? 'flow' : undefined };
+    if (note) {
+      const after = cloneCells(note.cells); after.splice(index, 0, cell);
+      rememberCellChange({ noteId, before: cloneCells(note.cells), after,
+        focusBefore: get().focusedCellId, focusAfter: cell.id });
+    }
     const previous = pendingCellInsertions.get(noteId);
     const insertion = (async () => {
       if (previous) await previous;
@@ -236,6 +343,7 @@ export const useStore = create<Store>((set, get) => ({
     })();
     pendingCellInsertions.set(noteId, insertion);
     set(state => ({
+      cellHistoryVersion: state.cellHistoryVersion + 1, lastChangeWasStructural: true,
       focusedCellId: state.selectedNoteId === noteId ? cell.id : state.focusedCellId,
       notes: state.notes.map(n => {
         if (n.id !== noteId) return n;
@@ -255,6 +363,7 @@ export const useStore = create<Store>((set, get) => ({
   updateCell: async (noteId: string, cellId: string, updates: Partial<Cell>) => {
     // Update store first so the UI reflects changes immediately (preserves cursor position)
     set(state => ({
+      lastChangeWasStructural: false,
       notes: state.notes.map(n => {
         if (n.id !== noteId) return n;
         return {
@@ -270,88 +379,32 @@ export const useStore = create<Store>((set, get) => ({
     await db.updateCell(noteId, cellId, updates);
   },
 
-  deleteCell: async (noteId: string, cellId: string) => {
+  deleteCell: async (noteId, cellId) => {
+    const note = get().notes.find(n => n.id === noteId);
+    if (!note || note.cells.length < 2) return;
+    const index = note.cells.findIndex(c => c.id === cellId);
+    await get().changeCells(noteId, note.cells.filter(c => c.id !== cellId), note.cells[Math.max(0, index - 1)]?.id);
+  },
+  moveCell: async (noteId, cellId, newIndex) => {
+    const note = get().notes.find(n => n.id === noteId);
+    if (!note) return;
+    const cells = [...note.cells];
+    const index = cells.findIndex(c => c.id === cellId);
+    if (index < 0) return;
+    if (Math.max(0, Math.min(newIndex, cells.length - 1)) === index) return;
+    const [cell] = cells.splice(index, 1);
+    cells.splice(Math.max(0, Math.min(newIndex, cells.length)), 0, cell);
+    await get().changeCells(noteId, cells, cellId);
+  },
+  convertCell: async (noteId, cellId, newType) => {
+    const note = get().notes.find(n => n.id === noteId);
+    const before = note && cloneCells(note.cells);
+    if (!note || !before || note.cells.find(c => c.id === cellId)?.type === newType) return;
     await pendingCellInsertions.get(noteId);
-    await db.deleteCell(noteId, cellId);
-    set(state => ({
-      notes: state.notes.map(n => {
-        if (n.id !== noteId) return n;
-        const cells = n.cells.filter(c => c.id !== cellId);
-        cells.forEach((c, i) => (c.sortOrder = i));
-        return { ...n, cells, updatedAt: Date.now() };
-      }),
-    }));
+    const converted = await db.convertCell(noteId, cellId, newType);
+    if (converted) await get().changeCells(noteId, before.map(c => c.id === cellId ? converted : c), cellId);
   },
-
-  moveCell: async (noteId: string, cellId: string, newIndex: number) => {
-    await pendingCellInsertions.get(noteId);
-    await db.moveCell(noteId, cellId, newIndex);
-    set(state => ({
-      notes: state.notes.map(n => {
-        if (n.id !== noteId) return n;
-
-        const cells = [...n.cells];
-        const currentIndex = cells.findIndex(c => c.id === cellId);
-        if (currentIndex === -1) return n;
-
-        const [cell] = cells.splice(currentIndex, 1);
-        cells.splice(newIndex, 0, cell);
-        cells.forEach((c, i) => (c.sortOrder = i));
-
-        return { ...n, cells, updatedAt: Date.now() };
-      }),
-    }));
-  },
-
-  convertCell: async (noteId: string, cellId: string, newType: CellType) => {
-    const previousCell = get()
-      .notes.find(n => n.id === noteId)
-      ?.cells.find(c => c.id === cellId);
-
-    await pendingCellInsertions.get(noteId);
-    const convertedCell = await db.convertCell(noteId, cellId, newType);
-    if (!convertedCell) return;
-
-    if (previousCell && previousCell.type !== newType) {
-      conversionUndoStack.push({ noteId, cell: { ...previousCell } });
-    }
-
-    set(state => ({
-      notes: state.notes.map(n => {
-        if (n.id !== noteId) return n;
-        return {
-          ...n,
-          cells: n.cells.map(c => c.id === cellId ? convertedCell : c),
-          updatedAt: Date.now(),
-        };
-      }),
-    }));
-  },
-
-  undoLastCellConversion: async () => {
-    const undo = conversionUndoStack.pop();
-    if (!undo) return false;
-
-    await db.updateCell(undo.noteId, undo.cell.id, {
-      type: undo.cell.type,
-      data: undo.cell.data,
-      language: undo.cell.language,
-      diagramType: undo.cell.diagramType,
-    });
-
-    set(state => ({
-      notes: state.notes.map(n => {
-        if (n.id !== undo.noteId) return n;
-        return {
-          ...n,
-          cells: n.cells.map(c => c.id === undo.cell.id ? { ...undo.cell } : c),
-          updatedAt: Date.now(),
-        };
-      }),
-    }));
-
-    return true;
-  },
+  undoLastCellConversion: async () => get().undoCellChange(),
 
   // ==================== TAG ACTIONS ====================
 
@@ -415,8 +468,10 @@ export const useStore = create<Store>((set, get) => ({
   // ==================== DATA LOADING ====================
 
   loadData: async (databasePath?: string) => {
+    await Promise.all([...pendingCellInsertions.values()]);
     currentLibraryPath = null;
-    conversionUndoStack.length = 0;
+    cellUndo.clear(); cellRedo.clear();
+    set({ navigationHistory: [], navigationIndex: -1, lastChangeWasStructural: false });
     noteBodyLoadPromises.clear();
     await db.initDatabase(databasePath);
     await db.ensureInboxNotebook();
@@ -482,6 +537,14 @@ export const useStore = create<Store>((set, get) => ({
 }));
 
 useStore.subscribe((state, previous) => {
+  if (!navigatingHistory && currentLibraryPath && state.selectedNoteId && state.selectedNoteId !== previous.selectedNoteId) {
+    const history = state.navigationHistory.slice(0, state.navigationIndex + 1);
+    if (history.at(-1) !== state.selectedNoteId) {
+      history.push(state.selectedNoteId);
+      if (history.length > 100) history.shift();
+      useStore.setState({ navigationHistory: history, navigationIndex: history.length - 1, lastChangeWasStructural: false });
+    }
+  }
   if (currentLibraryPath && preferencesChanged(state, previous)) savePreferences(currentLibraryPath, state);
 });
 

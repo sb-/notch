@@ -11,5 +11,5 @@ test('SQLite recovery, duplication, persisted navigation and atomic backup resto
     run.exited, new Response(run.stdout).text(), new Response(run.stderr).text(),
   ]);
   expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: '' });
-  expect(stdout.match(/^PASS /gm)).toHaveLength(6);
+  expect(stdout.match(/^PASS /gm)).toHaveLength(10);
 }, 30_000);

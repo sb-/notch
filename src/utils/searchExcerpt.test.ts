@@ -5,6 +5,14 @@ const plain = (parts: ReturnType<typeof searchExcerpt>) => parts.map(part => par
 const matches = (parts: ReturnType<typeof searchExcerpt>) => parts.filter(part => part.matched).map(part => part.text);
 
 describe('search result excerpts', () => {
+  test('centers and highlights a literal hyphenated term in later cell content', () => {
+    const parts = searchExcerpt([
+      { type: 'markdown', data: 'Background. '.repeat(30) },
+      { type: 'code', data: 'const label = "fresh-index-r3";' },
+    ], 'fresh-index-r3');
+    expect(plain(parts)).toContain('fresh-index-r3');
+    expect(matches(parts)).toEqual(['fresh-index-r3']);
+  });
   test('shows a code match after a long earlier Markdown cell', () => {
     const parts = searchExcerpt([
       { type: 'markdown', data: 'A long introduction. '.repeat(30) },

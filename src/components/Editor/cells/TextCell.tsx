@@ -35,18 +35,17 @@ export default function TextCell({
 }: TextCellProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const isComposing = useRef(false);
-  const initializedRef = useRef(false);
+  const lastData = useRef<string | undefined>(undefined);
   const resourceVersion = useResourceVersion();
 
-  // Set initial content only once on mount (with resource refs resolved to data URLs).
+  // Native typing owns its DOM. Structural undo/split can replace this cell's
+  // data externally, so reconcile those changes without rewriting each keystroke.
   useEffect(() => {
-    if (editorRef.current && !initializedRef.current) {
+    if (editorRef.current && data !== lastData.current) {
       editorRef.current.innerHTML = sanitizeRichText(resolveResourceHtml(data));
-      initializedRef.current = true;
+      lastData.current = data;
     }
-    // Initialize once on mount; cells remount (keyed by id) when the note changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [data]);
 
   // When resources finish loading (or change), point any unresolved <img> at the
   // freshly-cached data URL without rewriting the whole editor (preserves cursor).
@@ -67,7 +66,9 @@ export default function TextCell({
   const handleInput = useCallback(() => {
     if (editorRef.current && !isComposing.current) {
       normalizeRichTextColors(editorRef.current);
-      onChange(dehydrateResourceHtml(editorRef.current.innerHTML));
+      const value = dehydrateResourceHtml(editorRef.current.innerHTML);
+      lastData.current = value;
+      onChange(value);
     }
   }, [onChange]);
 

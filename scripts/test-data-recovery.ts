@@ -213,3 +213,92 @@ const savedRapid = (await db.getNote(rapid.id))!;
 expect(savedRapid.cells.map(c => c.data)).toEqual(['', 'immediate first', 'immediate second']);
 expect(savedRapid.cells.map(c => c.sortOrder)).toEqual([0, 1, 2]);
 console.log('PASS immediate insertion and rapid edits persist in order');
+
+// Exercise query quoting through the real service and FTS5 tokenizer, not a
+// mocked result list. Punctuation must not merge adjacent indexed tokens.
+await db.initDatabase('sqlite:literal-search');
+const searchBook = await db.createNotebook('Search');
+const literal = await db.createNote(searchBook.id, 'Literal search');
+await db.updateCell(literal.id, literal.cells[0].id, {
+  data: 'fresh-index-r3 foo:bar call(value) alpha"beta café-test 日本語-検索 ANSWER',
+});
+const joined = await db.createNote(searchBook.id, 'Joined tokens');
+await db.updateCell(joined.id, joined.cells[0].id, { data: 'freshindexr3 foobar callvalue alphabeta' });
+for (const query of ['fresh-index-r3', 'foo:bar', 'call(value)', 'alpha"beta', 'café-test', '日本語-検索', 'missing ans*']) {
+  expect((await db.searchNotes(query)).map(note => note.id)).toEqual([literal.id]);
+}
+expect((await db.searchNotes('freshindexr3')).map(note => note.id)).toEqual([joined.id]);
+for (const query of ['   ', '***', '"', '():^+-', '" OR *']) {
+  expect(await db.searchNotes(query)).toEqual([]);
+}
+await db.deleteNote(literal.id);
+expect(await db.searchNotes('fresh-index-r3')).toEqual([]);
+console.log('PASS literal punctuation, quotes, Unicode and prefixes search correctly through SQLite');
+
+// Rapid saves must collapse search work and never leave duplicate/stale rows.
+await useStore.getState().loadData('sqlite:batched-search');
+const batched = await useStore.getState().createNote(useStore.getState().notebooks[0].id, 'Batched');
+await Promise.all(Array.from({ length: 30 }, (_, i) => db.updateCell(batched.id, batched.cells[0].id, { data: `latest${i}` })));
+await db.flushSearchIndex();
+expect((await db.getNote(batched.id))!.cells[0].data).toBe('latest29');
+expect(connection!.query('SELECT count(*) AS c FROM notes_fts WHERE note_id=?').get(batched.id)).toEqual({ c: 1 });
+expect((await db.searchNotes('latest29')).map(n => n.id)).toEqual([batched.id]);
+expect(await db.searchNotes('latest0')).toEqual([]);
+connection!.query('INSERT INTO notes_fts(note_id,title,content) VALUES (?,?,?)').run(batched.id, 'Stale duplicate', 'obsolete');
+connection!.exec('DELETE FROM search_migrations');
+await db.initDatabase('sqlite:temporary-switch');
+await db.initDatabase('sqlite:batched-search');
+expect(connection!.query('SELECT count(*) AS c FROM notes_fts WHERE note_id=?').get(batched.id)).toEqual({ c: 1 });
+expect(await db.searchNotes('obsolete')).toEqual([]);
+console.log('PASS overlapping saves coalesce indexing; migration repairs duplicate and stale search entries');
+
+await useStore.getState().loadData('sqlite:structural-undo');
+const edited = await useStore.getState().createNote(useStore.getState().notebooks[0].id, 'Cell changes');
+await useStore.getState().updateCell(edited.id, edited.cells[0].id, { data: 'BeforeAfter' });
+const firstCell = { ...edited.cells[0], data: 'Before' };
+const secondCell = { ...firstCell, id: 'split-cell', data: 'After', sortOrder: 1 };
+await useStore.getState().changeCells(edited.id, [firstCell, secondCell], secondCell.id);
+expect((await db.getNote(edited.id))!.cells.map(c => c.data)).toEqual(['Before', 'After']);
+expect(await useStore.getState().undoCellChange()).toBe(true);
+expect((await db.getNote(edited.id))!.cells.map(c => c.data)).toEqual(['BeforeAfter']);
+expect(await useStore.getState().undoCellChange(true)).toBe(true);
+await useStore.getState().deleteCell(edited.id, secondCell.id);
+await useStore.getState().undoCellChange();
+expect((await db.getNote(edited.id))!.cells.map(c => c.id)).toEqual([firstCell.id, secondCell.id]);
+await useStore.getState().moveCell(edited.id, secondCell.id, 0);
+await useStore.getState().undoCellChange();
+expect((await db.getNote(edited.id))!.cells.map(c => c.data)).toEqual(['Before', 'After']);
+connection!.exec(`CREATE TRIGGER reject_cells BEFORE INSERT ON cells WHEN NEW.data='reject' BEGIN SELECT RAISE(ABORT,'injected failure'); END`);
+await expect(db.replaceNoteCells(edited.id, [{ ...firstCell, data: 'reject' }])).rejects.toThrow('injected failure');
+expect((await db.getNote(edited.id))!.cells.map(c => c.data)).toEqual(['Before', 'After']);
+await expect(useStore.getState().changeCells(edited.id, [{ ...firstCell, data: 'reject' }])).rejects.toThrow('injected failure');
+expect(useStore.getState().notes.find(n => n.id === edited.id)!.cells.map(c => c.data)).toEqual(['Before', 'After']);
+connection!.exec('DROP TRIGGER reject_cells');
+await useStore.getState().moveCell(edited.id, secondCell.id, 0);
+await useStore.getState().deleteCell(edited.id, firstCell.id);
+await Promise.all([useStore.getState().undoCellChange(), useStore.getState().undoCellChange()]);
+expect((await db.getNote(edited.id))!.cells.map(c => c.data)).toEqual(['Before', 'After']);
+await useStore.getState().moveCell(edited.id, secondCell.id, 0);
+await useStore.getState().updateCell(edited.id, firstCell.id, { data: 'Edited after move' });
+await useStore.getState().undoCellChange();
+expect((await db.getNote(edited.id))!.cells.map(c => c.data)).toEqual(['Edited after move', 'After']);
+console.log('PASS structural split/delete/move undo and redo persist atomically; failed replacement rolls back');
+
+const other = await useStore.getState().createNote(edited.notebookId, 'Other');
+const thirdNote = await useStore.getState().createNote(edited.notebookId, 'Third');
+const beforeReveal = useStore.getState().navigationHistory.length;
+await useStore.getState().selectNote(edited.id, true);
+expect(useStore.getState().navigationHistory.length).toBe(beforeReveal + 1);
+await useStore.getState().navigateHistory(-1);
+expect(useStore.getState().selectedNoteId).toBe(thirdNote.id);
+await useStore.getState().navigateHistory(-1);
+expect(useStore.getState().selectedNoteId).toBe(other.id);
+await useStore.getState().navigateHistory(-1);
+expect(useStore.getState().selectedNoteId).toBe(edited.id);
+await useStore.getState().navigateHistory(1);
+expect(useStore.getState().selectedNoteId).toBe(other.id);
+await useStore.getState().selectNote(edited.id);
+expect(useStore.getState().navigationHistory).not.toContain(thirdNote.id);
+await useStore.getState().loadData('sqlite:new-history');
+expect(useStore.getState().navigationHistory).toEqual([]);
+console.log('PASS note history supports back/forward, branches on new navigation, and resets per library');

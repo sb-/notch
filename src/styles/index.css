@@ -2112,3 +2112,26 @@ body {
   overflow-x: auto;
   overflow-y: hidden;
 }
+
+/* Separate read-only window; printing never includes app chrome. */
+.standalone-preview { height: 100vh; overflow: auto; background: white; color: #222; }
+.preview-window-toolbar { position: sticky; top: 0; display: flex; justify-content: space-between; padding: 12px 20px; background: #f3f3f3; color: #222; z-index: 2; }
+.preview-window-toolbar button { color: #222; border: 1px solid #bbb; padding: 6px 12px; border-radius: 5px; }
+.pdf-instructions { padding: 12px 32px 0; font-size: 13px; color: #555; }
+.print-content { padding: 32px; max-width: 960px; margin: auto; line-height: 1.6; color: #222; }
+.print-content > div { margin: 16px 0; }
+.print-content h1 { font-size: 28px; margin-bottom: 20px; }
+.print-content ul, .print-content ol { padding-left: 1.5em; }
+.print-content img, .print-content svg { max-width: 100%; height: auto; }
+.print-content pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: #f6f6f6; color: #222; }
+.print-content code { font-family: monospace; font-size: 12px; }
+.print-content .hljs { background: transparent !important; color: #222 !important; }
+.print-content table { border-collapse: collapse; } .print-content td, .print-content th { border: 1px solid #bbb; padding: 6px; }
+.context-menu button.context-menu-item { display: block; width: 100%; text-align: left; font: inherit; color: inherit; background: none; border: 0; }
+.context-menu button.context-menu-item:disabled { opacity: .4; }
+@media print {
+  html, body, #root, .standalone-preview { height: auto !important; overflow: visible !important; background: white !important; }
+  .preview-window-toolbar, .pdf-instructions { display: none !important; }
+  .print-content { max-width: none; padding: 0; }
+  .print-content img, .print-content .latex-cell, .print-content .diagram-preview { break-inside: avoid; }
+}

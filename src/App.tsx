@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react';
 import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from 'react';
+import { openPreview, connectPreviewWindows } from './services/previewWindows';
+import { hasCellHistory, flushPendingChanges } from './store';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { readTextFile } from '@tauri-apps/plugin-fs';
@@ -84,6 +86,42 @@ declare global {
 }
 
 export default function App() {
+  useEffect(() => {
+    const disconnect = connectPreviewWindows();
+    let exiting = false;
+    const exitListener = listen('notch-request-exit', async () => {
+      if (exiting) return;
+      exiting = true;
+      try {
+        await flushPendingChanges();
+        await invoke('complete_exit');
+      } catch (error) {
+        exiting = false;
+        await message(`Your latest changes could not be saved. Notch will stay open.\n\n${String(error)}`, { title: 'Could not save changes', kind: 'error' });
+      }
+    });
+    void exitListener.then(() => invoke('prepare_exit_listener'));
+    const navigationListener = listen<string>('notch-navigation', event => {
+      const state = useStore.getState();
+      if (state.settingsOpen || document.querySelector('[role="dialog"]')) return;
+      if (event.payload === 'scroll_sync') state.toggleScrollSync();
+      else void state.navigateHistory(event.payload === 'navigate_back' ? -1 : 1);
+    });
+
+    const open = (event: Event) => { void openPreview((event as CustomEvent).detail === 'print'); };
+    const cellsUndo = (event: KeyboardEvent) => {
+      const state = useStore.getState();
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'z' || !state.lastChangeWasStructural
+        || !state.selectedNoteId || state.settingsOpen || document.querySelector('[role="dialog"]')) return;
+      if ((event.target as HTMLElement)?.closest('input')) return;
+      if (!hasCellHistory(state.selectedNoteId, event.shiftKey)) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      void state.undoCellChange(event.shiftKey).catch(error => message(String(error), { title: 'Undo failed', kind: 'error' }));
+    };
+    window.addEventListener('notch-open-preview', open);
+    window.addEventListener('keydown', cellsUndo, true);
+    return () => { disconnect(); void exitListener.then(fn => fn()); void navigationListener.then(fn => fn()); window.removeEventListener('notch-open-preview', open); window.removeEventListener('keydown', cellsUndo, true); };
+  }, []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
@@ -730,8 +768,7 @@ export default function App() {
           console.log('Found note:', note?.id, note?.title);
           if (note) {
             const state = useStore.getState();
-            await state.selectNotebook(note.notebookId);
-            state.selectNote(note.id);
+            await state.selectNote(note.id, true);
           } else {
             console.warn('Quiver note not found for UUID:', uuid);
             await message('Linked note not found. It may not have been part of the imported library.', { title: 'Linked note', kind: 'warning' });
@@ -754,10 +791,7 @@ export default function App() {
         console.log('Found note:', note?.id, note?.title);
         if (note) {
           const state = useStore.getState();
-          // Select the notebook first (this loads that notebook's notes)
-          await state.selectNotebook(note.notebookId);
-          // Then select the note
-          state.selectNote(note.id);
+          await state.selectNote(note.id, true);
         } else {
           console.log('Note not found in database');
         }
@@ -776,8 +810,7 @@ export default function App() {
           const note = await getNoteBySourceUuid(uuid);
           if (note) {
             const state = useStore.getState();
-            await state.selectNotebook(note.notebookId);
-            state.selectNote(note.id);
+            await state.selectNote(note.id, true);
           } else {
             console.warn('Quiver note not found for UUID:', uuid);
             await message('Linked note not found. It may not have been part of the imported library.', { title: 'Linked note', kind: 'warning' });
@@ -791,8 +824,7 @@ export default function App() {
         const note = await getNote(noteId);
         if (note) {
           const state = useStore.getState();
-          await state.selectNotebook(note.notebookId);
-          state.selectNote(note.id);
+          await state.selectNote(note.id, true);
         }
       }
     };

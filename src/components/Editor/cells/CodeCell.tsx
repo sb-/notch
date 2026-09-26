@@ -131,6 +131,14 @@ export default function CodeCell({
       // until a native window resize, even when the outer container is correct.
       const editor = monaco.editor.create(container, { ...EDITOR_OPTIONS, model, dimension: { width, height } });
       editorRef.current = editor;
+      const readSelection = (event: Event) => {
+        const detail = (event as CustomEvent<{ offset?: number }>).detail;
+        const position = editor.getPosition();
+        if (position) detail.offset = model!.getOffsetAt(position);
+      };
+      container.addEventListener('notch-read-selection', readSelection);
+      subscriptions.push({ dispose: () => container.removeEventListener('notch-read-selection', readSelection) });
+
       subscriptions.push(
         editor.onDidContentSizeChange(() => syncEditorHeight(editor)),
         editor.onDidFocusEditorText(() => latest.current.onFocus()),

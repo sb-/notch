@@ -5,6 +5,8 @@ import type { Note, Cell } from '../types';
 import * as db from './database';
 import { renderMarkdown } from './markdown';
 import { resolveResourceHtml, inlineResourceRefs } from './resources';
+import { renderDiagram } from './diagrams';
+import { sanitizeRichText } from './html';
 import { parseLibraryBackup } from './backup';
 
 /**
@@ -141,10 +143,21 @@ export function exportNoteToHTML(note: Note): string {
 </html>`;
 }
 
+/** Fully rendered, offline content for floating preview and native PDF printing. */
+export async function exportNoteToPrintHTML(note: Note): Promise<string> {
+  const cells = await Promise.all(note.cells.map(async cell => {
+    if (cell.type !== 'diagram') return renderCellToHTML(cell);
+    try { return `<div class="diagram-preview">${await renderDiagram(cell.data, cell.diagramType || 'flow', 'light')}</div>`; }
+    catch { return `<pre>${escapeHtml(cell.data)}</pre><p>Unable to render diagram.</p>`; }
+  }));
+  return `<h1>${escapeHtml(note.title || 'Untitled')}</h1>`
+    + (note.tags.length ? `<p>${note.tags.map(tag => '#' + escapeHtml(tag)).join(' ')}</p>` : '') + cells.join('\n');
+}
+
 function renderCellToHTML(cell: Cell): string {
   switch (cell.type) {
     case 'text':
-      return `<div class="text-cell">${resolveResourceHtml(cell.data)}</div>`;
+      return `<div class="text-cell">${sanitizeRichText(resolveResourceHtml(cell.data))}</div>`;
 
     case 'markdown':
       return `<div class="markdown-cell">${renderMarkdown(cell.data)}</div>`;

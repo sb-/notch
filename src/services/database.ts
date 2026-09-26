@@ -13,6 +13,7 @@ import type {
   CellType,
 } from '../types';
 import { v4 as uuid } from 'uuid';
+import { searchTerms } from '../utils/searchTerms';
 
 let db: Database | null = null;
 let currentDbPath: string | null = null;
@@ -21,6 +22,7 @@ let currentDbPath: string | null = null;
 export async function initDatabase(dbPath = 'sqlite:notch.db'): Promise<void> {
   if (db && currentDbPath === dbPath) return;
 
+  await flushSearchIndex();
   if (db) {
     try {
       await db.close(currentDbPath ?? undefined);
@@ -150,41 +152,46 @@ export async function initDatabase(dbPath = 'sqlite:notch.db'): Promise<void> {
   await backfillFTSIfNeeded();
 }
 
-// One-time backfill: populate notes_fts from all existing notes/cells when
-// the FTS index is empty but notes exist (e.g., user imported a library or
-// upgraded from a version without FTS).
+// Repair old duplicate/stale entries once, atomically even with SQL pooling.
 async function backfillFTSIfNeeded(): Promise<void> {
-  if (!db) return;
-  try {
-    const noteCount = await db.select<{ c: number }[]>(
-      'SELECT COUNT(*) as c FROM notes'
-    );
-    const ftsCount = await db.select<{ c: number }[]>(
-      'SELECT COUNT(*) as c FROM notes_fts'
-    );
-    const notes = noteCount[0]?.c ?? 0;
-    const ftsRows = ftsCount[0]?.c ?? 0;
-    if (notes === 0 || ftsRows >= notes) return;
+  await getDb().execute('CREATE TABLE IF NOT EXISTS search_migrations (version INTEGER PRIMARY KEY)');
+  await getDb().execute(`CREATE TRIGGER IF NOT EXISTS repair_search_index AFTER INSERT ON search_migrations
+    BEGIN
+      DELETE FROM notes_fts;
+      INSERT INTO notes_fts (rowid, note_id, title, content)
+        SELECT n.rowid, n.id, n.title, COALESCE((SELECT group_concat(data, char(10))
+          FROM (SELECT data FROM cells WHERE note_id=n.id ORDER BY sort_order)), '') FROM notes n;
+    END`);
+  await getDb().execute('INSERT OR IGNORE INTO search_migrations (version) VALUES (1)');
+  await getDb().execute('CREATE TABLE IF NOT EXISTS cell_changes (note_id TEXT PRIMARY KEY, payload TEXT NOT NULL)');
+  await getDb().execute(`CREATE TRIGGER IF NOT EXISTS apply_cell_changes AFTER INSERT ON cell_changes
+    BEGIN
+      SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM notes WHERE id=NEW.note_id)
+        THEN RAISE(ABORT, 'Note no longer exists') END;
+      DELETE FROM cells WHERE note_id=NEW.note_id;
+      INSERT INTO cells (id,note_id,type,data,language,diagram_type,sort_order)
+        SELECT json_extract(value,'$.id'), NEW.note_id, json_extract(value,'$.type'),
+          json_extract(value,'$.data'), json_extract(value,'$.language'),
+          json_extract(value,'$.diagramType'), CAST(key AS INTEGER) FROM json_each(NEW.payload);
+      UPDATE notes SET updated_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE id=NEW.note_id;
+      DELETE FROM cell_changes WHERE note_id=NEW.note_id;
+    END`);
+}
 
-    // Clear any partial rows then repopulate in SQLite. Doing this note-by-note
-    // from JS makes large imported libraries noticeably slower to open.
-    await db.execute('DELETE FROM notes_fts');
-    await db.execute(`
-      INSERT INTO notes_fts (note_id, title, content)
-      SELECT
-        n.id,
-        n.title,
-        COALESCE((
-          SELECT group_concat(c.data, char(10))
-          FROM cells c
-          WHERE c.note_id = n.id
-          ORDER BY c.sort_order
-        ), '')
-      FROM notes n
-    `);
-  } catch (err) {
-    console.warn('FTS backfill failed:', err);
-  }
+// Serialize cell writes within each note so a slow earlier edit cannot win.
+const noteWrites = new Map<string, Promise<unknown>>();
+function writeNote<T>(id: string, action: () => Promise<T>): Promise<T> {
+  const previous = noteWrites.get(id) ?? Promise.resolve();
+  const work = previous.then(action);
+  noteWrites.set(id, work);
+  void work.finally(() => { if (noteWrites.get(id) === work) noteWrites.delete(id); }).catch(() => {});
+  return work;
+}
+
+export async function replaceNoteCells(noteId: string, cells: Cell[]): Promise<void> {
+  await writeNote(noteId, () => getDb().execute(
+    'INSERT INTO cell_changes (note_id,payload) VALUES (?,?)', [noteId, JSON.stringify(cells)]));
+  scheduleSearchIndex(noteId);
 }
 
 // Helper to get the database instance
@@ -474,6 +481,10 @@ export async function createNote(notebookId: string, title = 'Untitled', sourceU
 }
 
 export async function updateNote(id: string, updates: Partial<Note>): Promise<void> {
+  return writeNote(id, () => updateNoteNow(id, updates));
+}
+
+async function updateNoteNow(id: string, updates: Partial<Note>): Promise<void> {
   const updatedAt = updates.updatedAt ?? Date.now();
   const fields: string[] = ['updated_at = ?'];
   const values: (string | number | null)[] = [updatedAt];
@@ -509,8 +520,7 @@ export async function updateNote(id: string, updates: Partial<Note>): Promise<vo
     values
   );
 
-  // Update FTS index
-  await updateNoteFTS(id);
+  if (updates.title !== undefined) scheduleSearchIndex(id);
 }
 
 export async function deleteNote(id: string, permanent = false): Promise<void> {
@@ -564,6 +574,7 @@ export async function duplicateNote(id: string): Promise<Note> {
 export async function restoreLibrarySnapshot(snapshot: {
   notebooks: Notebook[]; notes: Note[]; tags: Tag[]; resources: Resource[];
 }): Promise<void> {
+  await getDb().execute('DROP TRIGGER IF EXISTS restore_library_snapshot');
   await getDb().execute('CREATE TABLE IF NOT EXISTS library_restore_payload (payload TEXT NOT NULL)');
   await getDb().execute(`
     CREATE TRIGGER IF NOT EXISTS restore_library_snapshot AFTER INSERT ON library_restore_payload
@@ -598,8 +609,8 @@ export async function restoreLibrarySnapshot(snapshot: {
         SELECT json_extract(value, '$.id'), json_extract(value, '$.noteId'),
           json_extract(value, '$.filename'), json_extract(value, '$.mimeType'), json_extract(value, '$.data')
         FROM json_each(NEW.payload, '$.resources');
-      INSERT INTO notes_fts (note_id, title, content)
-        SELECT n.id, n.title, COALESCE((SELECT group_concat(data, char(10)) FROM cells WHERE note_id = n.id), '')
+      INSERT INTO notes_fts (rowid, note_id, title, content)
+        SELECT n.rowid, n.id, n.title, COALESCE((SELECT group_concat(data, char(10)) FROM cells WHERE note_id = n.id), '')
         FROM notes n;
       DELETE FROM library_restore_payload;
     END
@@ -681,7 +692,11 @@ export async function createCell(
   };
 }
 
-export async function updateCell(
+export function updateCell(noteId: string, cellId: string, updates: Partial<Cell>): Promise<void> {
+  return writeNote(noteId, () => updateCellNow(noteId, cellId, updates));
+}
+
+async function updateCellNow(
   noteId: string,
   cellId: string,
   updates: Partial<Cell>
@@ -722,7 +737,7 @@ export async function updateCell(
       'UPDATE notes SET updated_at = ? WHERE id = ?',
       [Date.now(), noteId]
     );
-    await updateNoteFTS(noteId);
+    scheduleSearchIndex(noteId);
   }
 }
 
@@ -1021,43 +1036,60 @@ export async function removeTagFromNote(noteId: string, tagId: string): Promise<
 
 // ==================== SEARCH OPERATIONS ====================
 
-async function updateNoteFTS(noteId: string): Promise<void> {
-  const note = await getNote(noteId);
-  if (!note) return;
+const dirtySearchNotes = new Set<string>();
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+let indexing: Promise<void> | undefined;
+function scheduleSearchIndex(noteId: string): void {
+  dirtySearchNotes.add(noteId);
+  if (!searchTimer) searchTimer = setTimeout(() => {
+    searchTimer = undefined;
+    void flushSearchIndex().catch(error => console.error('Search indexing failed:', error));
+  }, 300);
+}
 
-  // Combine all cell content for search, dropping embedded resource refs so they
-  // don't pollute the index.
-  const content = note.cells
-    .map(cell => cell.data)
-    .join('\n')
-    .replace(/notch-resource:\/\/[\w-]+/g, ' ');
+export async function flushSearchIndex(): Promise<void> {
+  if (searchTimer) { clearTimeout(searchTimer); searchTimer = undefined; }
+  await Promise.all([...noteWrites.values(), ...indexJobs.values()]);
+  if (indexing) await indexing;
+  if (!dirtySearchNotes.size) return;
+  const work = (async () => {
+    while (dirtySearchNotes.size) {
+      const id = dirtySearchNotes.values().next().value!;
+      dirtySearchNotes.delete(id);
+      try { await updateNoteFTS(id); }
+      catch (error) { dirtySearchNotes.add(id); throw error; }
+    }
+  })();
+  indexing = work;
+  try { await work; } finally { if (indexing === work) indexing = undefined; }
+}
 
-  // Remove existing entry
-  await getDb().execute('DELETE FROM notes_fts WHERE note_id = ?', [noteId]);
-
-  // Insert new entry
-  await getDb().execute(
-    'INSERT INTO notes_fts (note_id, title, content) VALUES (?, ?, ?)',
-    [noteId, note.title, content]
-  );
+const indexJobs = new Map<string, Promise<void>>();
+function updateNoteFTS(noteId: string): Promise<void> {
+  const work = (indexJobs.get(noteId) ?? Promise.resolve()).then(() => rebuildNoteIndex(noteId));
+  indexJobs.set(noteId, work);
+  void work.finally(() => { if (indexJobs.get(noteId) === work) indexJobs.delete(noteId); }).catch(() => {});
+  return work;
+}
+async function rebuildNoteIndex(noteId: string): Promise<void> {
+  const cells = await getCellsByNote(noteId);
+  const content = cells.map(cell => cell.data).join('\n').replace(/notch-resource:\/\/[\w-]+/g, ' ');
+  // A stable rowid plus one replacement statement prevents duplicate entries.
+  await getDb().execute(`INSERT OR REPLACE INTO notes_fts (rowid,note_id,title,content)
+    SELECT rowid,id,title,? FROM notes WHERE id=?`, [content, noteId]);
 }
 
 export async function searchNotes(query: string): Promise<Note[]> {
+  await flushSearchIndex();
   if (!query.trim()) return [];
 
-  // Prepare FTS5 query: sanitize each term to avoid FTS5 syntax errors.
-  // FTS5 treats double quotes, asterisks, parentheses, colons, and other
-  // characters as operators. We strip them from each token and wrap the
-  // result in double quotes (a "phrase") so the user's literal text is
-  // matched verbatim. Empty tokens (after sanitization) are dropped.
-  const terms = query
-    .split(/\s+/)
-    .map(term => term.replace(/["*():^+\-]/g, '').trim())
-    .filter(term => term.length > 0);
+  const terms = searchTerms(query);
 
   if (terms.length === 0) return [];
 
-  const ftsQuery = terms.map(term => `"${term}"*`).join(' OR ');
+  // Quote literal terms and escape embedded quotes instead of stripping
+  // punctuation. SQLite then tokenizes queries the same way as indexed text.
+  const ftsQuery = terms.map(term => `"${term.replace(/"/g, '""')}"*`).join(' OR ');
 
   let rows: NoteRow[];
   try {

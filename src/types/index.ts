@@ -73,6 +73,11 @@ export type SortOrder = 'asc' | 'desc';
 // Application state types
 export interface AppState {
   // UI state
+  scrollSync: boolean;
+  navigationHistory: string[];
+  navigationIndex: number;
+  cellHistoryVersion: number;
+  lastChangeWasStructural: boolean;
   layoutMode: LayoutMode;
   editorViewMode: EditorViewMode;
   sidebarVisible: boolean;
@@ -107,6 +112,10 @@ export interface AppState {
 // Actions for state management
 export interface AppActions {
   // Layout actions
+  toggleScrollSync: () => void;
+  navigateHistory: (direction: -1 | 1) => Promise<void>;
+  changeCells: (noteId: string, cells: Cell[], focusId?: string) => Promise<void>;
+  undoCellChange: (redo?: boolean) => Promise<boolean>;
   setLayoutMode: (mode: LayoutMode) => void;
   setEditorViewMode: (mode: EditorViewMode) => void;
   toggleSidebar: () => void;
@@ -117,7 +126,7 @@ export interface AppActions {
 
   // Selection actions
   selectNotebook: (id: string | null) => void;
-  selectNote: (id: string | null) => void;
+  selectNote: (id: string | null, revealNotebook?: boolean) => Promise<void>;
   selectCollection: (collection: SpecialCollection | null) => void;
   selectTag: (id: string | null) => void;
   setFocusedCellId: (id: string | null) => void;

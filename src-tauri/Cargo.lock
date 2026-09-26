@@ -2230,6 +2230,8 @@ dependencies = [
 name = "notch"
 version = "0.3.1"
 dependencies = [
+ "objc2-app-kit",
+ "objc2-web-kit",
  "serde",
  "serde_json",
  "tauri",

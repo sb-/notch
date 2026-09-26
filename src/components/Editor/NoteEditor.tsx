@@ -1,5 +1,9 @@
 import { Suspense, lazy, useState, useCallback, useRef, useEffect } from 'react';
 import { flushSync } from 'react-dom';
+import { v4 as uuid } from 'uuid';
+import { message } from '@tauri-apps/plugin-dialog';
+import { copyCell, readCell } from '../../services/cellClipboard';
+import { hasCellHistory } from '../../store';
 import { open } from '@tauri-apps/plugin-dialog';
 import { readFile } from '@tauri-apps/plugin-fs';
 import { useStore, useSelectedNote, useEditorViewMode, useNotebooks } from '../../store';
@@ -8,6 +12,7 @@ import FindBar from '../Search/FindBar';
 import { copyNoteLink } from '../NoteList/NoteListItem';
 import {
   loadResourcesForNote,
+  dehydrateResourceHtml,
   createResourceFromBase64,
   bytesToBase64,
   RESOURCE_PROTOCOL,
@@ -62,6 +67,25 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   const toggleAssistant = useStore(state => state.toggleAssistant);
   const assistantVisible = useStore(state => state.assistantVisible);
 
+  const scrollSync = useStore(state => state.scrollSync);
+  const navigationIndex = useStore(state => state.navigationIndex);
+  const navigationHistory = useStore(state => state.navigationHistory);
+  const cellHistoryVersion = useStore(state => state.cellHistoryVersion);
+  const storeFocusId = useStore(state => state.focusedCellId);
+  const [showCellActions, setShowCellActions] = useState(false);
+  const previewRef = useRef<HTMLDivElement>(null);
+  const syncedPositions = useRef(new WeakMap<HTMLElement, number>());
+  const syncScroll = (source: HTMLDivElement, target: HTMLDivElement | null) => {
+    if (!scrollSync || editorViewMode !== 'split' || !target) return;
+    const expected = syncedPositions.current.get(source);
+    syncedPositions.current.delete(source);
+    // Ignore the scroll we caused, without depending on animation frames that
+    // WKWebView may pause when a native window is in the background.
+    if (expected !== undefined && Math.abs(expected - source.scrollTop) < 1) return;
+    const extent = source.scrollHeight - source.clientHeight;
+    target.scrollTop = extent > 0 ? source.scrollTop / extent * (target.scrollHeight - target.clientHeight) : 0;
+    syncedPositions.current.set(target, target.scrollTop);
+  };
   const [showCellTypeMenu, setShowCellTypeMenu] = useState(false);
   const [showTagMenu, setShowTagMenu] = useState(false);
   const [showNotebookMenu, setShowNotebookMenu] = useState(false);
@@ -89,6 +113,9 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   // "Text Cell" while focusedCellId catches up after a note/cell switch.
   const focusedCell = note?.cells.find(c => c.id === focusedCellId) ?? note?.cells[0] ?? null;
   const effectiveFocusedCellId = focusedCell?.id ?? null;
+  useEffect(() => {
+    if (storeFocusId && note?.cells.some(c => c.id === storeFocusId)) { setFocusedCellId(storeFocusId); setFocusRequest(n => n + 1); }
+  }, [cellHistoryVersion]);
 
   // Mirror the focused cell to the store so other panels (e.g. the assistant)
   // can insert into the cell the user is actually working in.
@@ -166,6 +193,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
     setShowNotebookMenu(false);
     setShowTagMenu(false);
     setShowCellTypeMenu(false);
+    setShowCellActions(false);
   }, []);
 
   useEffect(() => {
@@ -245,6 +273,80 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
     return Array.from(contentRef.current?.querySelectorAll<HTMLElement>('[data-cell-id]') ?? [])
       .find(element => element.dataset.cellId === effectiveFocusedCellId);
   }, [effectiveFocusedCellId]);
+
+  const handleCellAction = useCallback(async (action: string) => {
+    if (!note || showingPreviousNote || editorViewMode === 'preview') return;
+    const state = useStore.getState();
+    if (state.settingsOpen || document.querySelector('[role="dialog"]')) return;
+    const cell = note.cells.find(c => c.id === effectiveFocusedCellId);
+    if (!cell) return;
+    closeAllMenus();
+    try {
+      const index = note.cells.indexOf(cell);
+      if (action === 'undo' || action === 'redo') { await state.undoCellChange(action === 'redo'); return; }
+      if (action === 'copy' || action === 'cut') {
+        await copyCell(note.id, cell);
+        if (action === 'cut') {
+          const remaining = note.cells.filter(c => c.id !== cell.id);
+          if (!remaining.length) remaining.push({ id: uuid(), type: 'text', data: '', sortOrder: 0 });
+          await state.changeCells(note.id, remaining, remaining[Math.max(0, index - 1)]?.id);
+        }
+      } else if (action === 'paste') {
+        const pasted = await readCell(note.id);
+        if (!pasted) return;
+        const cells = [...note.cells]; cells.splice(index + 1, 0, pasted);
+        await state.changeCells(note.id, cells, pasted.id);
+        await loadResourcesForNote(note.id);
+      } else if (action === 'delete') {
+        await handleDeleteCell(cell.id);
+      } else if (action === 'up' || action === 'down') {
+        await state.moveCell(note.id, cell.id, index + (action === 'up' ? -1 : 1));
+      } else if (action === 'split') {
+        const element = getFocusedCellElement();
+        if (!element) return;
+        let before: string, after: string;
+        const rich = element.querySelector<HTMLElement>('[contenteditable="true"]');
+        if (rich) {
+          const selection = window.getSelection();
+          if (!selection?.rangeCount || !rich.contains(selection.getRangeAt(0).startContainer)) return;
+          const caret = selection.getRangeAt(0);
+          const left = caret.cloneRange(); left.selectNodeContents(rich); left.setEnd(caret.startContainer, caret.startOffset);
+          const right = caret.cloneRange(); right.selectNodeContents(rich); right.setStart(caret.startContainer, caret.startOffset);
+          const div = document.createElement('div'); div.append(left.cloneContents()); before = dehydrateResourceHtml(div.innerHTML);
+          div.replaceChildren(right.cloneContents()); after = dehydrateResourceHtml(div.innerHTML);
+        } else {
+          const detail: { offset?: number } = {};
+          // Monaco owns its model selection; other cell types use a textarea.
+          const codeHost = element.querySelector('.monaco-container');
+          codeHost?.dispatchEvent(new CustomEvent('notch-read-selection', { detail }));
+          const textarea = element.querySelector<HTMLTextAreaElement>('textarea:not(.inputarea)');
+          const offset = detail.offset ?? textarea?.selectionStart;
+          if (offset === undefined) return;
+          before = cell.data.slice(0, offset); after = cell.data.slice(offset);
+        }
+        const next = { ...cell, id: uuid(), data: after };
+        const cells = [...note.cells]; cells.splice(index, 1, { ...cell, data: before }, next);
+        await state.changeCells(note.id, cells, next.id);
+      }
+    } catch (error) {
+      await message(String(error), { title: 'Cell operation failed', kind: 'error' });
+    }
+  }, [note, showingPreviousNote, editorViewMode, effectiveFocusedCellId, getFocusedCellElement, closeAllMenus, handleDeleteCell]);
+
+  useEffect(() => {
+    const handle = (event: Event) => { void handleCellAction((event as CustomEvent<string>).detail); };
+    const shortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || !event.altKey || event.shiftKey || event.isComposing) return;
+      if (!(event.target as HTMLElement).closest('[data-cell-id]')) return;
+      const action = ({ Enter: 'split', NumpadEnter: 'split', KeyX: 'cut', KeyC: 'copy', KeyV: 'paste' } as Record<string, string>)[event.code];
+      if (!action) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      void handleCellAction(action);
+    };
+    window.addEventListener('notch-cell-action', handle);
+    window.addEventListener('keydown', shortcut, true);
+    return () => { window.removeEventListener('notch-cell-action', handle); window.removeEventListener('keydown', shortcut, true); };
+  }, [handleCellAction]);
 
   const handleFormat = async (action: FormattingAction) => {
     if (!note || showingPreviousNote || !focusedCell) return;
@@ -420,7 +522,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   const availableTags = tags.filter(t => !note.tags.includes(t.name));
 
   const renderEditor = () => (
-    <div className="editor-content" ref={contentRef} onKeyDownCapture={handleKeyDown} onClick={closeAllMenus}>
+    <div className="editor-content" ref={contentRef} onScroll={e => syncScroll(e.currentTarget, previewRef.current)} onKeyDownCapture={handleKeyDown} onClick={closeAllMenus}>
       <div className="cells-container">
         {note.cells.map((cell) => (
           <CellContainer
@@ -441,7 +543,7 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
   );
 
   const renderPreview = () => (
-    <div className="editor-content">
+    <div className="editor-content" ref={previewRef} onScroll={e => syncScroll(e.currentTarget, contentRef.current)}>
       <Suspense fallback={<div className="preview-loading" aria-label="Loading preview" />}>
         <NotePreview note={note} showHeader={false} />
       </Suspense>
@@ -591,6 +693,20 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
           </div>
 
           <div className="editor-toolbar-right">
+            <div style={{ position: 'relative' }}>
+              <button className="editor-view-btn" aria-label="Cell actions" title="Cell actions" onMouseDown={e => e.preventDefault()}
+                disabled={editorViewMode === 'preview'} onClick={() => setShowCellActions(v => !v)}>⋯</button>
+              {showCellActions && <div className="context-menu" style={{ right: 0 }}>
+                {([['split','Split Cell at Cursor'],['cut','Cut Cell'],['copy','Copy Cell'],['paste','Paste Cell'],
+                  ['up','Move Cell Up'],['down','Move Cell Down'],['delete','Delete Cell'],['undo','Undo Cell Change'],['redo','Redo Cell Change']] as const).map(([action,label]) =>
+                  <button key={action} className="context-menu-item" onMouseDown={e => e.preventDefault()}
+                    disabled={(action === 'undo' || action === 'redo') && !hasCellHistory(note.id, action === 'redo')}
+                    onClick={() => void handleCellAction(action)}>{label}</button>)}
+              </div>}
+            </div>
+            {editorViewMode === 'split' && <button className={`editor-view-btn ${scrollSync ? 'active' : ''}`}
+              title="Synchronize scrolling" aria-label="Synchronize scrolling" aria-pressed={scrollSync}
+              onClick={() => useStore.getState().toggleScrollSync()}>↕</button>}
             <button
               className={`editor-view-btn ${editorViewMode === 'editor' ? 'active' : ''}`}
               onClick={() => handleViewModeChange('editor')}
@@ -659,6 +775,14 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
 
       {/* Footer */}
       <div className="editor-footer">
+        <button className="editor-footer-btn" title="Back (⌘[)" aria-label="Back" disabled={navigationIndex <= 0}
+          onClick={() => void useStore.getState().navigateHistory(-1)}>‹</button>
+        <button className="editor-footer-btn" title="Forward (⌘])" aria-label="Forward" disabled={navigationIndex >= navigationHistory.length - 1}
+          onClick={() => void useStore.getState().navigateHistory(1)}>›</button>
+        <button className="editor-footer-btn" title="Floating Preview" aria-label="Floating Preview"
+          onClick={() => window.dispatchEvent(new CustomEvent('notch-open-preview'))}>▣</button>
+        <button className="editor-footer-btn" title="Export PDF…" aria-label="Export PDF"
+          onClick={() => window.dispatchEvent(new CustomEvent('notch-open-preview', { detail: 'print' }))}>PDF</button>
         <button
           className={`editor-footer-btn ${note.isFavorite ? 'active' : ''}`}
           onClick={() => toggleFavorite(note.id)}

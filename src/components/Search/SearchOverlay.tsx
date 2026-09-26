@@ -34,8 +34,7 @@ export default function SearchOverlay({ onClose }: SearchOverlayProps) {
 
   const navigateToNote = useCallback((note: Note) => {
     const state = useStore.getState();
-    state.selectNotebook(note.notebookId);
-    state.selectNote(note.id);
+    void state.selectNote(note.id, true);
     onClose();
   }, [onClose]);
 

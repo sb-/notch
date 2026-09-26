@@ -1,4 +1,5 @@
 import type { Cell } from '../types';
+import { searchTerms } from './searchTerms';
 
 export interface SearchExcerptPart {
   text: string;
@@ -56,9 +57,7 @@ export function searchExcerpt(
 
   // Mirror the search service's literal OR/prefix terms, including multiword
   // searches whose words need not occur next to one another.
-  const terms = [...new Set(query.split(/\s+/)
-    .map(term => term.replace(/["*():^+\-]/g, '').trim())
-    .filter(Boolean))].sort((a, b) => b.length - a.length);
+  const terms = searchTerms(query).sort((a, b) => b.length - a.length);
   const pattern = terms.length
     ? new RegExp(terms.map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'giu')
     : null;

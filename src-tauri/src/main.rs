@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, atomic::{AtomicBool, Ordering}},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{
@@ -22,6 +22,23 @@ const LIBRARY_DATABASE: &str = "notch.db";
 
 #[derive(Default)]
 struct PendingLibraryPath(Mutex<Option<String>>);
+
+#[derive(Default)]
+struct SaveBeforeExit {
+    ready: AtomicBool,
+    approved: AtomicBool,
+}
+
+#[tauri::command]
+fn prepare_exit_listener(state: State<SaveBeforeExit>) {
+    state.ready.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn complete_exit(app: tauri::AppHandle, state: State<SaveBeforeExit>) {
+    state.approved.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +80,51 @@ async fn select_quiver_library(app: tauri::AppHandle) -> Result<Option<String>, 
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
+#[tauri::command]
+async fn open_preview(app: tauri::AppHandle, printing: bool) -> Result<(), String> {
+    let label = if printing { "pdf-preview" } else { "floating-preview" };
+    if let Some(window) = app.get_webview_window(label) {
+        window.unminimize().map_err(|e| e.to_string())?;
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(&app, label,
+        tauri::WebviewUrl::App(format!("index.html?preview={label}").into()))
+        .title(if printing { "PDF Preview" } else { "Floating Preview" })
+        .inner_size(720.0, 760.0).min_inner_size(360.0, 300.0)
+        .always_on_top(!printing).build().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn print_preview(window: tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "pdf-preview" && window.label() != "floating-preview" {
+        return Err("Printing is only available from a note preview".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // WKWebView counts pages from NSPrintInfo. CSS @page margins reduce
+        // the printable area later and can silently truncate a long document.
+        window.with_webview(|webview| unsafe {
+            let view: &objc2_web_kit::WKWebView = &*webview.inner().cast();
+            let parent: &objc2_app_kit::NSWindow = &*webview.ns_window().cast();
+            let info = objc2_app_kit::NSPrintInfo::sharedPrintInfo();
+            for set_margin in [objc2_app_kit::NSPrintInfo::setTopMargin,
+                objc2_app_kit::NSPrintInfo::setBottomMargin,
+                objc2_app_kit::NSPrintInfo::setLeftMargin,
+                objc2_app_kit::NSPrintInfo::setRightMargin] {
+                set_margin(&info, 51.0);
+            }
+            let operation = view.printOperationWithPrintInfo(&info);
+            operation.setCanSpawnSeparateThread(true);
+            operation.runOperationModalForWindow_delegate_didRunSelector_contextInfo(parent, None, None, std::ptr::null_mut());
+        }).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    window.print().map_err(|e| e.to_string())
+}
+
 fn main() {
     let mut builder = tauri::Builder::default();
 
@@ -76,12 +138,17 @@ fn main() {
 
     let app = builder
         .manage(PendingLibraryPath::default())
+        .manage(SaveBeforeExit::default())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_sql::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
+            open_preview,
+            print_preview,
+            prepare_exit_listener,
+            complete_exit,
             select_quiver_library,
             create_library_package,
             open_library_package,
@@ -101,9 +168,48 @@ fn main() {
             }
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    let state = window.state::<SaveBeforeExit>();
+                    if state.ready.load(Ordering::SeqCst) && !state.approved.load(Ordering::SeqCst) {
+                        api.prevent_close();
+                        let _ = window.emit("notch-request-exit", ());
+                    }
+                }
+            } else if matches!(event, tauri::WindowEvent::Destroyed) {
+                let _ = window.app_handle().emit_to("main", "preview-closed", window.label());
+            }
+        })
         .on_menu_event(|app, event| {
-            let window = app.get_webview_window("main").unwrap();
+            let Some(window) = app.get_webview_window("main") else { return; };
             match event.id().as_ref() {
+                "show_main_window" => {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                "show_floating_window" => {
+                    if let Some(preview) = app.get_webview_window("floating-preview") {
+                        let _ = preview.unminimize();
+                        let _ = preview.show();
+                        let _ = preview.set_focus();
+                    } else {
+                        let _ = window.eval("window.dispatchEvent(new CustomEvent('notch-open-preview',{detail:'floating'}))");
+                    }
+                }
+                "cell_split" | "cell_cut" | "cell_copy" | "cell_paste" | "cell_up" | "cell_down" | "cell_delete" | "cell_undo" | "cell_redo" => {
+                    let action = event.id().as_ref().trim_start_matches("cell_");
+                    let _ = window.eval(&format!("window.dispatchEvent(new CustomEvent('notch-cell-action',{{detail:'{action}'}}))"));
+                }
+                "floating_preview" | "export_pdf" => {
+                    let mode = if event.id().as_ref() == "export_pdf" { "print" } else { "floating" };
+                    let _ = window.eval(&format!("window.dispatchEvent(new CustomEvent('notch-open-preview',{{detail:'{mode}'}}))"));
+                }
+                "navigate_back" | "navigate_forward" | "scroll_sync" => {
+                    let _ = window.emit("notch-navigation", event.id().as_ref());
+                }
+
                 "new_note" => {
                     let _ = window.eval("window.__NOTCH__.newNote()");
                 }
@@ -177,6 +283,13 @@ fn main() {
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { ref api, .. } = event {
+            let state = app_handle.state::<SaveBeforeExit>();
+            if state.ready.load(Ordering::SeqCst) && !state.approved.load(Ordering::SeqCst) {
+                api.prevent_exit();
+                let _ = app_handle.emit_to("main", "notch-request-exit", ());
+            }
+        }
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         if let tauri::RunEvent::Opened { urls } = event {
             handle_opened_urls(app_handle, urls);
@@ -606,6 +719,26 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
         ],
     )?;
 
+    let cell_menu = Submenu::with_items(handle, "Cell", true, &[
+        &MenuItem::with_id(handle, "cell_split", "Split Cell at Cursor", true, Some("CmdOrCtrl+Alt+Enter"))?,
+        &MenuItem::with_id(handle, "cell_cut", "Cut Cell", true, Some("CmdOrCtrl+Alt+X"))?,
+        &MenuItem::with_id(handle, "cell_copy", "Copy Cell", true, Some("CmdOrCtrl+Alt+C"))?,
+        &MenuItem::with_id(handle, "cell_paste", "Paste Cell", true, Some("CmdOrCtrl+Alt+V"))?,
+        &PredefinedMenuItem::separator(handle)?,
+        &MenuItem::with_id(handle, "cell_up", "Move Cell Up", true, None::<&str>)?,
+        &MenuItem::with_id(handle, "cell_down", "Move Cell Down", true, None::<&str>)?,
+        &MenuItem::with_id(handle, "cell_delete", "Delete Cell", true, None::<&str>)?,
+        &PredefinedMenuItem::separator(handle)?,
+        &MenuItem::with_id(handle, "cell_undo", "Undo Cell Change", true, None::<&str>)?,
+        &MenuItem::with_id(handle, "cell_redo", "Redo Cell Change", true, None::<&str>)?,
+    ])?;
+    note_menu.append(&MenuItem::with_id(handle, "floating_preview", "Show Floating Preview", true, None::<&str>)?)?;
+    note_menu.append(&MenuItem::with_id(handle, "export_pdf", "Export PDF…", true, None::<&str>)?)?;
+    view_menu.append(&PredefinedMenuItem::separator(handle)?)?;
+    view_menu.append(&MenuItem::with_id(handle, "navigate_back", "Back", true, Some("CmdOrCtrl+["))?)?;
+    view_menu.append(&MenuItem::with_id(handle, "navigate_forward", "Forward", true, Some("CmdOrCtrl+]"))?)?;
+    view_menu.append(&MenuItem::with_id(handle, "scroll_sync", "Synchronize Scrolling", true, None::<&str>)?)?;
+
     // Window menu
     let window_menu = Submenu::with_items(
         handle,
@@ -616,8 +749,13 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
             &PredefinedMenuItem::maximize(handle, None)?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::close_window(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "show_main_window", "Note Editor", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "show_floating_window", "Floating Preview", true, None::<&str>)?,
         ],
     )?;
+    #[cfg(target_os = "macos")]
+    window_menu.set_as_windows_menu_for_nsapp()?;
 
     // Help menu
     let help_menu = Submenu::with_items(
@@ -650,6 +788,7 @@ fn create_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Err
             &file_menu,
             &edit_menu,
             &note_menu,
+            &cell_menu,
             &view_menu,
             &window_menu,
             &help_menu,

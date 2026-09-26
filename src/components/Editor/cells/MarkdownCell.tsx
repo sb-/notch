@@ -128,14 +128,17 @@ export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocuse
     if (e.key === 'Escape') {
       textarea.blur();
     }
-    if (e.key === 'ArrowUp' && onNavigatePrev) {
+    // Selection and modified movement belong to the textarea, not cell navigation.
+    const canNavigate = !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey
+      && !e.nativeEvent.isComposing && textarea.selectionStart === textarea.selectionEnd;
+    if (canNavigate && e.key === 'ArrowUp' && onNavigatePrev) {
       const { selectionStart } = textarea;
       const textBeforeCursor = data.substring(0, selectionStart);
       if (!textBeforeCursor.includes('\n')) {
         e.preventDefault();
         onNavigatePrev();
       }
-    } else if (e.key === 'ArrowDown' && onNavigateNext) {
+    } else if (canNavigate && e.key === 'ArrowDown' && onNavigateNext) {
       const { selectionStart } = textarea;
       const textAfterCursor = data.substring(selectionStart);
       if (!textAfterCursor.includes('\n')) {
@@ -145,13 +148,9 @@ export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocuse
     }
     if (e.key === 'Tab') {
       e.preventDefault();
-      const start = textarea.selectionStart;
-      const end = textarea.selectionEnd;
-      const newValue = data.substring(0, start) + '  ' + data.substring(end);
-      onChange(newValue);
-      setTimeout(() => {
-        textarea.selectionStart = textarea.selectionEnd = start + 2;
-      }, 0);
+      // Like toolbar formatting, use WebKit's edit transaction so indentation
+      // participates in native undo/redo and emits the normal input event.
+      document.execCommand('insertText', false, '  ');
     }
   };
 
