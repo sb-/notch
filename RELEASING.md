@@ -62,6 +62,11 @@ base64 -i certificate.p12 | pbcopy   # paste into the APPLE_CERTIFICATE secret
 
 ## Cutting a release
 
+Default to a **minor version bump** unless the user explicitly specifies another
+bump or version. `bun run release minor` runs preflight checks and updates the
+three version files below; also synchronize the Notch package version in
+`src-tauri/Cargo.lock` before committing.
+
 1. Bump the version in **all three** places (keep them in sync):
    - `package.json` → `version`
    - `src-tauri/tauri.conf.json` → `version`

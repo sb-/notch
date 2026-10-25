@@ -1,9 +1,12 @@
-# Notch 0.3.2
+# Notch 0.4.0
 
-This release adds more Quiver-style editing and viewing workflows, improves search responsiveness for large notes, and fixes navigation and preview polish.
+This release brings Emacs and Vim keybindings to Markdown cells, alongside more Quiver-style editing and viewing workflows, faster search for large notes, and navigation and preview improvements. It includes the changes from the unpublished 0.3.2 draft.
 
 ## Editing and navigation
 
+- Use Emacs and Vim keybindings in Markdown cells as well as code cells, including word movement, kill/yank, mark selection, and Vim editing modes.
+- Edit Markdown with stable syntax highlighting, word wrapping, and undoable toolbar formatting and image insertion. Pasted images retain the original insertion position while they are saved.
+- Match editor themes to the system appearance by default, while preserving explicitly selected themes.
 - Split cells at the cursor, cut/copy/paste whole cells, and undo or redo structural cell changes.
 - Navigate Back and Forward between notes.
 - Open notes in independent editable windows, with changes synchronized between windows in the same library. Closing a window or quitting waits for pending edits to save.
@@ -22,6 +25,7 @@ This release adds more Quiver-style editing and viewing workflows, improves sear
 
 ## Performance and polish
 
+- Create Markdown and code editors as their cells approach the viewport to reduce work when opening long notes.
 - Fetch compact search summaries instead of loading full matching note bodies. Search indexing strips rich-text markup while preserving code and readable text.
 - Keep the selected search result visible during keyboard navigation and improve search accessibility.
 - Reuse preview rendering and resource reads, and avoid redundant work when no detached editor is open.
@@ -32,6 +36,8 @@ In a synthetic search fixture of 50 large notes, result loading dropped from rou
 
 ## Verification and known limits
 
-123 automated tests pass. Type checking, the native Rust check, and an optimized macOS QA build passed. Native testing covered search navigation, Find wrapping and scrolling, detached-window editing and synchronization, save-on-quit, presentation mode, floating previews, PNG and plain-text export, code themes, and Vim/Emacs settings. Detailed evidence is in the round 6 performance and round 7 feature QA reports.
+134 automated tests pass, along with type checking and the production frontend build. Browser checks covered Markdown Emacs/Vim editing, mode switching, formatting undo, and Find. Delayed image insertion has automated regression coverage; its final browser interaction check was interrupted by approval-service timeouts.
+
+Earlier native QA covered search navigation, Find wrapping and scrolling, detached-window editing and synchronization, save-on-quit, presentation mode, floating previews, PNG and plain-text export, code themes, and Vim/Emacs settings. Detailed evidence is in the round 6 performance and round 7 feature QA reports. The updated Markdown editor still needs native WKWebView clipboard, file-drop, and menu-shortcut verification.
 
 PNG export is macOS-only and limits captures to 24 million logical pixels or 30,000 points in height; larger notes can use PDF. Arbitrary attachments and shared file-based synchronization remain gaps relative to Quiver. Signed-release installation and updater installation were not tested in this round.
