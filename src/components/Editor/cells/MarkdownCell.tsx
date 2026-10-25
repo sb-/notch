@@ -1,6 +1,8 @@
-import { useRef, useEffect, useMemo } from 'react';
+import { useMemo, useRef } from 'react';
+import type * as Monaco from 'monaco-editor';
 import { createResourceFromFile, RESOURCE_PROTOCOL } from '../../../services/resources';
-import { highlightMarkdownSource } from '../../../services/markdownHighlight';
+import { isImageFile, markdownImageSnippet } from '../textEdits';
+import MonacoCellEditor, { type FileInsertion } from './MonacoCellEditor';
 
 interface MarkdownCellProps {
   noteId: string;
@@ -14,145 +16,100 @@ interface MarkdownCellProps {
   onNavigateNext?: () => void;
 }
 
-// Above this size, skip highlighting and render plain text so very large cells
-// stay responsive (highlighting is O(n) per keystroke).
-const HIGHLIGHT_LIMIT = 50_000;
+const LINE_HEIGHT = 20;
 
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
+// Markdown is prose: wrap to the cell width (no horizontal scrolling), no
+// gutter, and none of the code-editor conveniences that fight typing and
+// copying sentences. Height follows the content, like code cells; the page
+// scrolls, not the editor. Indentation is set on the model (MARKDOWN_MODEL),
+// never here: construction options are shared Monaco configuration.
+const MARKDOWN_OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
+  minimap: { enabled: false },
+  lineNumbers: 'off',
+  glyphMargin: false,
+  folding: false,
+  lineDecorationsWidth: 0,
+  lineNumbersMinChars: 0,
+  scrollBeyondLastLine: false,
+  fontSize: 13,
+  lineHeight: LINE_HEIGHT,
+  fontFamily: "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
+  automaticLayout: false,
+  wordWrap: 'on',
+  wrappingIndent: 'same',
+  renderLineHighlight: 'none',
+  renderWhitespace: 'none',
+  guides: { indentation: false },
+  matchBrackets: 'never',
+  autoClosingBrackets: 'never',
+  autoClosingQuotes: 'never',
+  autoSurround: 'never',
+  unicodeHighlight: { ambiguousCharacters: false },
+  stickyScroll: { enabled: false },
+  scrollbar: {
+    vertical: 'hidden',
+    horizontal: 'hidden',
+    // A hidden scrollbar still narrows the wrapping column by its size.
+    verticalScrollbarSize: 0,
+    horizontalScrollbarSize: 0,
+    handleMouseWheel: false,
+    alwaysConsumeMouseWheel: false,
+  },
+  padding: { top: 0, bottom: 0 },
+  overviewRulerBorder: false,
+  overviewRulerLanes: 0,
+  hideCursorInOverviewRuler: true,
+  quickSuggestions: false,
+  suggestOnTriggerCharacters: false,
+  parameterHints: { enabled: false },
+  wordBasedSuggestions: 'off',
+  snippetSuggestions: 'none',
+  inlineSuggest: { enabled: false },
+  occurrencesHighlight: 'off',
+  selectionHighlight: false,
+  cursorBlinking: 'solid',
+  cursorStyle: 'line',
+  // Clipboard and pointer behave like the plain text editor this replaced:
+  // plain-text copies (no theme colours into Text cells or other apps),
+  // nothing copied or cut without a selection, the native context menu, no
+  // link underlines/hovers, and no "paste as"/"drop as" pickers.
+  copyWithSyntaxHighlighting: false,
+  emptySelectionClipboard: false,
+  contextmenu: false,
+  links: false,
+  hover: { enabled: false },
+  pasteAs: { enabled: false },
+  dropIntoEditor: { enabled: true, showDropSelector: 'never' },
+};
 
-// Trailing newline keeps the final line/caret visible behind the textarea.
-function buildOverlayHtml(src: string): string {
-  if (src.length > HIGHLIGHT_LIMIT) return `${escapeHtml(src)}\n`;
-  try {
-    return `${highlightMarkdownSource(src)}\n`;
-  } catch {
-    return `${escapeHtml(src)}\n`;
-  }
-}
+const MARKDOWN_MODEL: Monaco.editor.ITextModelUpdateOptions = { tabSize: 2, insertSpaces: true };
 
-export default function MarkdownCell({ noteId, data, onChange, onFocus, isFocused, focusRequest, onBackspaceEmpty, onNavigatePrev, onNavigateNext }: MarkdownCellProps) {
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+export default function MarkdownCell({ noteId, ...props }: MarkdownCellProps) {
+  const noteIdRef = useRef(noteId);
+  noteIdRef.current = noteId;
 
-  // Text and syntax styling must update together: swapping in a plain overlay
-  // while a debounce runs makes every unchanged token flash on each keystroke.
-  // Memoize by source so unrelated renders do no work; the size limit above
-  // keeps very large cells on the inexpensive plain-text path.
-  const highlightedHtml = useMemo(() => buildOverlayHtml(data), [data]);
+  // Pasted and dropped images become note resources, referenced by markdown
+  // inserted at the caret (or the drop point).
+  const imageInsertion = useMemo<FileInsertion>(() => ({
+    accepts: isImageFile,
+    text: async file => {
+      const id = await createResourceFromFile(noteIdRef.current, file);
+      return markdownImageSnippet(file.name, `${RESOURCE_PROTOCOL}${id}`);
+    },
+  }), []);
 
-  // Focus this cell's editor when it becomes the focused cell (e.g. via keyboard
-  // navigation), without stealing focus while the user types elsewhere.
-  useEffect(() => {
-    const ta = textareaRef.current;
-    if (isFocused && !document.activeElement?.closest('.find-bar') && ta && document.activeElement !== ta) {
-      ta.focus();
-    }
-  }, [isFocused, focusRequest]);
-
-  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    onChange(e.target.value);
-  };
-
-  // Insert markdown text at the current cursor position (or replace selection).
-  const insertAtCursor = (snippet: string) => {
-    const textarea = textareaRef.current;
-    const start = textarea?.selectionStart ?? data.length;
-    const end = textarea?.selectionEnd ?? data.length;
-    const next = data.slice(0, start) + snippet + data.slice(end);
-    onChange(next);
-    setTimeout(() => {
-      if (textarea) {
-        const pos = start + snippet.length;
-        textarea.selectionStart = textarea.selectionEnd = pos;
-      }
-    }, 0);
-  };
-
-  const insertImageFiles = async (files: File[]) => {
-    const images = files.filter(file => file.type.startsWith('image/'));
-    if (images.length === 0) return;
-    for (const file of images) {
-      const id = await createResourceFromFile(noteId, file);
-      const alt = file.name.replace(/\.[^.]+$/, '');
-      insertAtCursor(`\n![${alt}](${RESOURCE_PROTOCOL}${id})\n`);
-    }
-  };
-
-  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData.files);
-    if (files.some(file => file.type.startsWith('image/'))) {
-      e.preventDefault();
-      void insertImageFiles(files);
-    }
-  };
-
-  const handleDrop = (e: React.DragEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.dataTransfer.files);
-    if (files.some(file => file.type.startsWith('image/'))) {
-      e.preventDefault();
-      void insertImageFiles(files);
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-
-    if (e.key === 'Backspace' && data === '' && onBackspaceEmpty) {
-      e.preventDefault();
-      onBackspaceEmpty();
-      return;
-    }
-    if (e.key === 'Escape') {
-      textarea.blur();
-    }
-    // Selection and modified movement belong to the textarea, not cell navigation.
-    const canNavigate = !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey
-      && !e.nativeEvent.isComposing && textarea.selectionStart === textarea.selectionEnd;
-    if (canNavigate && e.key === 'ArrowUp' && onNavigatePrev) {
-      const { selectionStart } = textarea;
-      const textBeforeCursor = data.substring(0, selectionStart);
-      if (!textBeforeCursor.includes('\n')) {
-        e.preventDefault();
-        onNavigatePrev();
-      }
-    } else if (canNavigate && e.key === 'ArrowDown' && onNavigateNext) {
-      const { selectionStart } = textarea;
-      const textAfterCursor = data.substring(selectionStart);
-      if (!textAfterCursor.includes('\n')) {
-        e.preventDefault();
-        onNavigateNext();
-      }
-    }
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      // Like toolbar formatting, use WebKit's edit transaction so indentation
-      // participates in native undo/redo and emits the normal input event.
-      document.execCommand('insertText', false, '  ');
-    }
-  };
-
-  // Highlight overlay: a <pre> shows the syntax-highlighted source and sets the
-  // height; the transparent <textarea> on top captures input. The two share
-  // identical text metrics so they stay aligned.
   return (
-    <div className="markdown-editor">
-      <pre className="markdown-editor-highlight" aria-hidden="true">
-        <code dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
-      </pre>
-      <textarea
-        ref={textareaRef}
-        className="markdown-editor-input"
-        aria-label="Markdown cell"
-        value={data}
-        spellCheck={false}
-        onChange={handleChange}
-        onFocus={onFocus}
-        onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
-        onDrop={handleDrop}
-      />
-    </div>
+    <MonacoCellEditor
+      {...props}
+      language="markdown"
+      ariaLabel="Markdown cell"
+      wrapperClassName="markdown-cell-wrapper"
+      options={MARKDOWN_OPTIONS}
+      modelOptions={MARKDOWN_MODEL}
+      blurOnEscape
+      appShortcuts
+      indentOnTab
+      fileInsertion={imageInsertion}
+    />
   );
 }

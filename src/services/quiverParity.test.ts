@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test';
 import { findOffsets, noteMatches } from './noteFind';
 import { notePlainText, noteCodeOnly } from './noteFormats';
-import { parseCodePreferences } from '../store/codePreferences';
+import { parseCodePreferences, resolveCodeTheme } from '../store/codePreferences';
 import type { Note } from '../types';
 const note: Note = { id: 'note', title: 'Example', notebookId: 'book', tags: ['qa'], isFavorite: false, isTrashed: false, createdAt: 1, updatedAt: 1, sortOrder: 0, cells: [
   { id: 'markdown', type: 'markdown', data: '# Intro\nA paragraph.', sortOrder: 0 },
@@ -28,7 +28,11 @@ test('whole-note plain text omits rich text markup and code-only excludes all ot
   expect(noteCodeOnly({...note,cells:[]})).toBe('');
 });
 test('code preferences validate stored values and preserve explicit false choices', () => {
-  expect(parseCodePreferences({theme:'invalid',tabSize:100,keyBinding:'other',lineNumbers:false})).toMatchObject({theme:'vs-dark',tabSize:2,keyBinding:'default',lineNumbers:false});
+  expect(parseCodePreferences({theme:'invalid',tabSize:100,keyBinding:'other',lineNumbers:false})).toMatchObject({theme:'auto',tabSize:2,keyBinding:'default',lineNumbers:false});
+  expect(parseCodePreferences({theme:'vs-dark'}).theme).toBe('vs-dark');
+  expect(resolveCodeTheme('auto',false)).toBe('vs');
+  expect(resolveCodeTheme('auto',true)).toBe('vs-dark');
+  expect(resolveCodeTheme('hc-black',false)).toBe('hc-black');
   expect(parseCodePreferences({theme:'vs',tabSize:8,keyBinding:'vim',softTabs:false})).toMatchObject({theme:'vs',tabSize:8,keyBinding:'vim',softTabs:false});
 });
 test('plain text preserves code indentation and paragraph boundaries while removing Markdown formatting', () => {

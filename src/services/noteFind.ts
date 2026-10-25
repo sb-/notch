@@ -33,10 +33,16 @@ export function revealMatch(match: NoteMatch): () => void {
   const reveal = () => {
     if (cancelled) return;
     cell.querySelectorAll('[data-find-marker]').forEach(el => el.remove());
+    // Monaco cells (code, markdown) highlight and scroll themselves and cancel
+    // the event. Until Monaco exists they edit through a plain textarea.
     const monaco = cell.querySelector('.monaco-container');
-    if (monaco) { monaco.dispatchEvent(new CustomEvent('notch-find', { detail: match })); return; }
-    const editable = cell.querySelector<HTMLElement>('[contenteditable="true"], .markdown-editor-highlight');
-    const textarea = cell.querySelector<HTMLTextAreaElement>('textarea');
+    if (monaco) {
+      const event = new CustomEvent('notch-find', { detail: match, cancelable: true });
+      monaco.dispatchEvent(event);
+      if (event.defaultPrevented) return;
+    }
+    const editable = cell.querySelector<HTMLElement>('[contenteditable="true"]');
+    const textarea = cell.querySelector<HTMLTextAreaElement>('textarea:not(.inputarea)');
     if (editable) {
       const walker = document.createTreeWalker(editable, NodeFilter.SHOW_TEXT);
       const range = document.createRange();

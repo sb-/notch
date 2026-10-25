@@ -21,6 +21,8 @@ import {
 } from '../../services/resources';
 import { sanitizeRichText } from '../../services/html';
 import { escapeHtml, formatMarkdownSelection, type FormattingAction } from './formatting';
+import { minimalReplacement } from './textEdits';
+import { applyCellEdit, readCellSelection } from './cells/editorBridge';
 import { LANGUAGE_OPTIONS, toMonacoLanguage } from './codeLanguages';
 import type { CellType, EditorViewMode, Note } from '../../types';
 
@@ -316,12 +318,8 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
           const div = document.createElement('div'); div.append(left.cloneContents()); before = dehydrateResourceHtml(div.innerHTML);
           div.replaceChildren(right.cloneContents()); after = dehydrateResourceHtml(div.innerHTML);
         } else {
-          const detail: { offset?: number } = {};
-          // Monaco owns its model selection; other cell types use a textarea.
-          const codeHost = element.querySelector('.monaco-container');
-          codeHost?.dispatchEvent(new CustomEvent('notch-read-selection', { detail }));
-          const textarea = element.querySelector<HTMLTextAreaElement>('textarea:not(.inputarea)');
-          const offset = detail.offset ?? textarea?.selectionStart;
+          // Monaco cells answer through their host; other cells use a textarea.
+          const offset = readCellSelection(element)?.caret;
           if (offset === undefined) return;
           before = cell.data.slice(0, offset); after = cell.data.slice(offset);
         }
@@ -353,22 +351,16 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
     if (!note || showingPreviousNote || !focusedCell) return;
     const element = getFocusedCellElement();
     if (focusedCell.type === 'markdown') {
-      const textarea = element?.querySelector<HTMLTextAreaElement>('textarea');
-      if (!textarea) return;
-      const result = formatMarkdownSelection(textarea.value, textarea.selectionStart, textarea.selectionEnd, action);
-      // Native insertText creates a real undo transaction in WebKit. Assigning
-      // a controlled textarea value bypasses (and can clear) that history.
-      textarea.focus();
-      let start = 0;
-      while (start < textarea.value.length && textarea.value[start] === result.data[start]) start++;
-      let end = textarea.value.length;
-      let replacementEnd = result.data.length;
-      while (end > start && replacementEnd > start && textarea.value[end - 1] === result.data[replacementEnd - 1]) {
-        end--; replacementEnd--;
-      }
-      textarea.setSelectionRange(start, end);
-      document.execCommand('insertText', false, result.data.slice(start, replacementEnd));
-      textarea.setSelectionRange(result.start, result.end);
+      const selection = element && readCellSelection(element);
+      if (!element || !selection) return;
+      const result = formatMarkdownSelection(selection.value, selection.start, selection.end, action);
+      // Replace only the changed span through the editor (Monaco, or the
+      // textarea fallback's native insertText) so it is one real undo step.
+      applyCellEdit(element, {
+        ...minimalReplacement(selection.value, result.data),
+        selection: { start: result.start, end: result.end },
+        focus: true,
+      });
     } else if (focusedCell.type === 'text') {
       const editor = element?.querySelector<HTMLElement>('[contenteditable="true"]');
       if (!editor) return;
@@ -434,11 +426,11 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
     if (!note || showingPreviousNote) return;
     const cellElement = getFocusedCellElement();
     const textEditor = cellElement?.querySelector<HTMLElement>('[contenteditable="true"]');
-    const textarea = cellElement?.querySelector<HTMLTextAreaElement>('.markdown-editor-input');
     const selection = window.getSelection();
     const range = textEditor && selection?.rangeCount && textEditor.contains(selection.anchorNode)
       ? selection.getRangeAt(0).cloneRange() : null;
-    const textSelection = textarea ? { start: textarea.selectionStart, end: textarea.selectionEnd } : null;
+    const markdownFocused = note.cells.find(c => c.id === effectiveFocusedCellId)?.type === 'markdown';
+    const textSelection = cellElement && markdownFocused ? readCellSelection(cellElement) : null;
     const selected = await open({
       multiple: false,
       title: 'Insert Image',
@@ -460,12 +452,14 @@ export default function NoteEditor({ showFindBar, onCloseFindBar }: NoteEditorPr
       const start = textSelection?.start ?? focused.data.length;
       const end = textSelection?.end ?? start;
       const snippet = `\n${ref}\n`;
-      await updateCell(note.id, focused.id, { data: focused.data.slice(0, start) + snippet + focused.data.slice(end) });
-      requestAnimationFrame(() => {
-        if (!textarea?.isConnected) return;
-        textarea.focus();
-        textarea.setSelectionRange(start + snippet.length, start + snippet.length);
-      });
+      const caret = start + snippet.length;
+      // Through the live editor when the cell is still mounted (keeps undo and
+      // places the caret); otherwise straight into the stored source.
+      const inserted = cellElement?.isConnected && useStore.getState().selectedNoteId === note.id
+        && applyCellEdit(cellElement, { start, end, text: snippet, selection: { start: caret, end: caret }, focus: true });
+      if (!inserted) {
+        await updateCell(note.id, focused.id, { data: focused.data.slice(0, start) + snippet + focused.data.slice(end) });
+      }
     } else if (focused && focused.type === 'text') {
       const stableImage = `<img src="${RESOURCE_PROTOCOL}${id}" data-resource-id="${id}" alt="${escapeHtml(alt)}">`;
       if (textEditor?.isConnected && useStore.getState().selectedNoteId === note.id) {

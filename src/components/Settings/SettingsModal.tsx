@@ -74,10 +74,13 @@ export default function SettingsModal() {
         <div className="settings-modal-body">
           <section className="settings-section code-settings">
             <div className="settings-section-title">Code Cells</div>
-            <label>Theme<select aria-label="Code theme" value={code.theme} onChange={e => update({ theme: e.target.value as typeof code.theme })}><option value="vs-dark">Dark</option><option value="vs">Light</option><option value="hc-black">High Contrast</option></select></label>
+            <label>Theme<select aria-label="Code theme" value={code.theme} onChange={e => update({ theme: e.target.value as typeof code.theme })}><option value="auto">Match Appearance</option><option value="vs-dark">Dark</option><option value="vs">Light</option><option value="hc-black">High Contrast</option></select></label>
             <label>Tab size<select aria-label="Tab size" value={code.tabSize} onChange={e => update({ tabSize: Number(e.target.value) })}>{[2,4,8].map(n => <option key={n} value={n}>{n} spaces</option>)}</select></label>
-            <label>Key binding<select aria-label="Code key binding" value={code.keyBinding} onChange={e => update({ keyBinding: e.target.value as typeof code.keyBinding })}><option value="default">Standard</option><option value="vim">Vim</option><option value="emacs">Emacs</option></select></label>
             {([['lineNumbers','Line numbers'],['invisibles','Invisibles'],['indentGuides','Indent guides'],['softTabs','Use soft tabs']] as const).map(([key,label]) => <label key={key}>{label}<input type="checkbox" checked={code[key]} onChange={e => update({ [key]: e.target.checked })} /></label>)}
+          </section>
+          <section className="settings-section">
+            <div className="settings-section-title">Code &amp; Markdown Cells</div>
+            <label>Key binding<select aria-label="Editor key binding" value={code.keyBinding} onChange={e => update({ keyBinding: e.target.value as typeof code.keyBinding })}><option value="default">Standard</option><option value="vim">Vim</option><option value="emacs">Emacs</option></select></label>
           </section>
           <section className="settings-section">
             <div className="settings-section-title">Assistant</div>

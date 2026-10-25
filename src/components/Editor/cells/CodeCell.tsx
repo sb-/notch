@@ -1,9 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { loader } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
-import { loadKeyBinding } from './monaco';
-import { useCodePreferences } from '../../../store/codePreferences';
+import type { CodePreferences } from '../../../store/codePreferences';
 import { toMonacoLanguage } from '../codeLanguages';
+import MonacoCellEditor, { type MonacoEditor } from './MonacoCellEditor';
 
 interface CodeCellProps {
   data: string;
@@ -19,11 +17,8 @@ interface CodeCellProps {
 
 const EDITOR_LINE_HEIGHT = 21;
 const HORIZONTAL_SCROLLBAR_RESERVE = 8;
-const MIN_EDITOR_HEIGHT = EDITOR_LINE_HEIGHT + HORIZONTAL_SCROLLBAR_RESERVE;
 
 const EDITOR_OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
-  ariaLabel: 'Code cell',
-  theme: 'vs-dark',
   minimap: { enabled: false },
   lineNumbers: 'on',
   glyphMargin: false,
@@ -62,259 +57,25 @@ const EDITOR_OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
   selectOnLineNumbers: false,
 };
 
-export default function CodeCell({
-  data,
-  language,
-  onChange,
-  onFocus,
-  isFocused,
-  focusRequest,
-  onBackspaceEmpty,
-  onNavigatePrev,
-  onNavigateNext,
-}: CodeCellProps) {
-  const preferences = useCodePreferences(state => state.preferences);
-  const statusRef = useRef<HTMLDivElement>(null);
-  const [editorHeight, setEditorHeight] = useState(MIN_EDITOR_HEIGHT);
-  const [editorReady, setEditorReady] = useState(false);
-  const [loadError, setLoadError] = useState(false);
-  const pendingInputRef = useRef<HTMLTextAreaElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
-  const monacoRef = useRef<typeof Monaco | null>(null);
-  const applyingExternalValue = useRef(false);
-  const layingOut = useRef(false);
-  // Long-lived Monaco listeners must read the current note and cell callbacks.
-  const latest = useRef({ data, language, onChange, isFocused, onFocus, onBackspaceEmpty, onNavigatePrev, onNavigateNext });
-  latest.current = { data, language, onChange, isFocused, onFocus, onBackspaceEmpty, onNavigatePrev, onNavigateNext };
+function applyCodePreferences(editor: MonacoEditor, preferences: CodePreferences) {
+  editor.updateOptions({
+    lineNumbers: preferences.lineNumbers ? 'on' : 'off',
+    renderWhitespace: preferences.invisibles ? 'all' : 'none',
+    guides: { indentation: preferences.indentGuides },
+  });
+  editor.getModel()?.updateOptions({ tabSize: preferences.tabSize, insertSpaces: preferences.softTabs });
+}
 
-  const syncEditorHeight = useCallback((editor: Monaco.editor.IStandaloneCodeEditor) => {
-    const height = Math.max(MIN_EDITOR_HEIGHT, Math.ceil(editor.getContentHeight()) + HORIZONTAL_SCROLLBAR_RESERVE);
-    setEditorHeight(current => current === height ? current : height);
-  }, []);
-
-  const layoutEditor = useCallback(() => {
-    const editor = editorRef.current;
-    const container = containerRef.current;
-    if (!editor || !container || layingOut.current) return;
-    const { clientWidth: width, clientHeight: height } = container;
-    if (width <= 0 || height <= 0) return;
-    layingOut.current = true;
-    try {
-      // WKWebView may suspend animation frames while the native window is in
-      // the background. Monaco's public render(true) renders synchronously, so
-      // mounting and resizing never depend on the next animation frame arriving.
-      editor.layout({ width, height }, true);
-      editor.render(true);
-      syncEditorHeight(editor);
-    } finally {
-      layingOut.current = false;
-    }
-  }, [syncEditorHeight]);
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    let disposed = false;
-    let model: Monaco.editor.ITextModel | null = null;
-    const subscriptions: Monaco.IDisposable[] = [];
-
-    const createWhenVisible = () => {
-      const monaco = monacoRef.current;
-      if (disposed || !monaco || editorRef.current) return;
-      const { clientWidth: width, clientHeight: height } = container;
-      if (width <= 0 || height <= 0) return;
-
-      const pending = pendingInputRef.current;
-      const transferFocus = pending === document.activeElement;
-      const selection = pending ? [pending.selectionStart, pending.selectionEnd] : null;
-      model = monaco.editor.createModel(pending?.value ?? latest.current.data, toMonacoLanguage(latest.current.language));
-      // Create directly in the visible, measured host. The React wrapper creates
-      // Monaco inside display:none, which WKWebView can leave at its 5×5 minimum
-      // until a native window resize, even when the outer container is correct.
-      const editor = monaco.editor.create(container, { ...EDITOR_OPTIONS, model, dimension: { width, height } });
-      editorRef.current = editor;
-      const decorations = editor.createDecorationsCollection();
-      const find = (event: Event) => {
-        const match = (event as CustomEvent<{ start: number; end: number } | null>).detail;
-        if (!match) { decorations.clear(); return; }
-        const start = model!.getPositionAt(match.start), end = model!.getPositionAt(match.end);
-        decorations.set([{ range: new monaco.Range(start.lineNumber, start.column, end.lineNumber, end.column), options: { inlineClassName: 'note-find-match' } }]);
-        const scroller = container.closest<HTMLElement>('.editor-content');
-        if (scroller) scroller.scrollTop += container.getBoundingClientRect().top - scroller.getBoundingClientRect().top + editor.getTopForLineNumber(start.lineNumber) - scroller.clientHeight / 2;
-        editor.revealRangeInCenterIfOutsideViewport(new monaco.Range(start.lineNumber, start.column, end.lineNumber, end.column));
-        editor.render(true);
-      };
-      container.addEventListener('notch-find', find);
-      subscriptions.push({ dispose: () => { container.removeEventListener('notch-find', find); decorations.clear(); } });
-      container.closest('[data-cell-id]')?.dispatchEvent(new Event('notch-editor-ready'));
-      const readSelection = (event: Event) => {
-        const detail = (event as CustomEvent<{ offset?: number }>).detail;
-        const position = editor.getPosition();
-        if (position) detail.offset = model!.getOffsetAt(position);
-      };
-      container.addEventListener('notch-read-selection', readSelection);
-      subscriptions.push({ dispose: () => container.removeEventListener('notch-read-selection', readSelection) });
-
-      subscriptions.push(
-        editor.onDidChangeCursorPosition(event => {
-          if (!editor.hasTextFocus()) return;
-          const scroller = container.closest<HTMLElement>('.editor-content');
-          if (!scroller) return;
-          const y = container.getBoundingClientRect().top - scroller.getBoundingClientRect().top + editor.getTopForLineNumber(event.position.lineNumber) - editor.getScrollTop();
-          if (y < 8) scroller.scrollTop += y - 8;
-          else if (y + EDITOR_LINE_HEIGHT > scroller.clientHeight - 8) scroller.scrollTop += y + EDITOR_LINE_HEIGHT - scroller.clientHeight + 8;
-        }),
-        editor.onDidContentSizeChange(() => syncEditorHeight(editor)),
-        editor.onDidFocusEditorText(() => latest.current.onFocus()),
-        editor.onDidChangeModelContent(() => {
-          if (!applyingExternalValue.current) latest.current.onChange(editor.getValue());
-        }),
-        editor.onKeyDown(event => {
-          const { onBackspaceEmpty, onNavigatePrev, onNavigateNext } = latest.current;
-          const key = event.browserEvent.key;
-          if (key === 'Backspace' && editor.getValue() === '' && onBackspaceEmpty) {
-            event.preventDefault();
-            onBackspaceEmpty();
-            return;
-          }
-          if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
-          const position = editor.getPosition();
-          const currentModel = editor.getModel();
-          if (!position || !currentModel) return;
-          if (key === 'ArrowUp' && position.lineNumber === 1 && onNavigatePrev) {
-            event.preventDefault();
-            onNavigatePrev();
-          } else if (key === 'ArrowDown' && position.lineNumber === currentModel.getLineCount() && onNavigateNext) {
-            event.preventDefault();
-            onNavigateNext();
-          }
-        }),
-      );
-      syncEditorHeight(editor);
-      setEditorReady(true);
-      layoutEditor();
-      if (transferFocus) {
-        if (selection) {
-          const start = model.getPositionAt(selection[0]);
-          const end = model.getPositionAt(selection[1]);
-          editor.setSelection({ startLineNumber: start.lineNumber, startColumn: start.column,
-            endLineNumber: end.lineNumber, endColumn: end.column });
-        }
-        editor.focus();
-      }
-    };
-
-    const observer = new ResizeObserver(() => {
-      if (editorRef.current) layoutEditor();
-      else createWhenVisible();
-    });
-    observer.observe(container);
-    const initialization = loader.init();
-    void initialization.then(monaco => {
-      if (disposed) return;
-      monacoRef.current = monaco;
-      createWhenVisible();
-    }).catch(error => {
-      if (disposed || error?.type === 'cancelation') return;
-      console.error('Unable to initialize code editor', error);
-      setLoadError(true);
-    });
-    void document.fonts.ready.then(() => {
-      if (!disposed) layoutEditor();
-    });
-    return () => {
-      disposed = true;
-      observer.disconnect();
-      initialization.cancel();
-      subscriptions.forEach(subscription => subscription.dispose());
-      editorRef.current?.dispose();
-      model?.dispose();
-      editorRef.current = null;
-      monacoRef.current = null;
-    };
-  }, [layoutEditor, syncEditorHeight]);
-
-  useEffect(() => {
-    const editor = editorRef.current;
-    if (!editor) return;
-    monacoRef.current?.editor.setTheme(preferences.theme);
-    editor.updateOptions({ lineNumbers: preferences.lineNumbers ? 'on' : 'off', renderWhitespace: preferences.invisibles ? 'all' : 'none', guides: { indentation: preferences.indentGuides } });
-    editor.getModel()?.updateOptions({ tabSize: preferences.tabSize, insertSpaces: preferences.softTabs });
-  }, [preferences, editorReady]);
-  useEffect(() => {
-    const editor = editorRef.current;
-    if (!editor) return;
-    let disposed = false;
-    let binding: { dispose(): void } | undefined;
-    const attach = async () => {
-      if (preferences.keyBinding === 'vim') {
-        const { initVimMode } = await loadKeyBinding('vim');
-        if (!disposed) binding = initVimMode(editor, statusRef.current!);
-      } else if (preferences.keyBinding === 'emacs') {
-        const { EmacsExtension } = await loadKeyBinding('emacs');
-        if (!disposed) { const mode = new EmacsExtension(editor); mode.start(); binding = mode; }
-      }
-    };
-    void attach().catch(error => console.warn('Keyboard binding failed', error));
-    return () => { disposed = true; binding?.dispose(); if (statusRef.current) statusRef.current.textContent = ''; };
-  }, [preferences.keyBinding, editorReady]);
-
-  useLayoutEffect(() => {
-    if (editorReady) {
-      layoutEditor();
-      containerRef.current?.closest('[data-cell-id]')?.dispatchEvent(new Event('notch-editor-ready'));
-    }
-  }, [editorReady, editorHeight, layoutEditor]);
-
-  useLayoutEffect(() => {
-    const editor = editorRef.current;
-    const model = editor?.getModel();
-    if (!editor || !model) return;
-    if (data !== editor.getValue()) {
-      applyingExternalValue.current = true;
-      try {
-        editor.executeEdits('notch', [{ range: model.getFullModelRange(), text: data, forceMoveMarkers: true }]);
-        editor.pushUndoStop();
-      } finally {
-        applyingExternalValue.current = false;
-      }
-      layoutEditor();
-    }
-  }, [data, editorReady, layoutEditor]);
-
-  useEffect(() => {
-    const model = editorRef.current?.getModel();
-    if (model) {
-      monacoRef.current?.editor.setModelLanguage(model, toMonacoLanguage(language));
-      editorRef.current?.render(true);
-    }
-  }, [language, editorReady]);
-
-  useLayoutEffect(() => {
-    if (isFocused && !document.activeElement?.closest('.find-bar')) {
-      if (editorRef.current) editorRef.current.focus();
-      else pendingInputRef.current?.focus();
-    }
-  }, [isFocused, focusRequest]);
-
+export default function CodeCell({ language, ...props }: CodeCellProps) {
   return (
-    <div data-code-theme={preferences.theme} className="code-cell-wrapper" style={{ position: 'relative' }}>
-      <div ref={statusRef} className="code-key-status" aria-live="polite" />
-      <div ref={containerRef} className="monaco-container" style={{ height: editorHeight + 'px' }} />
-      {!editorReady && (
-        <textarea
-          ref={pendingInputRef}
-          aria-label="Code cell"
-          className="cell-editor"
-          style={{ position: 'absolute', inset: 0 }}
-          value={data}
-          onChange={event => onChange(event.target.value)}
-          onFocus={onFocus}
-          spellCheck={false}
-          placeholder={loadError ? 'Code editor unavailable; plain-text editing is active.' : ''}
-        />
-      )}
-    </div>
+    <MonacoCellEditor
+      {...props}
+      language={toMonacoLanguage(language)}
+      ariaLabel="Code cell"
+      wrapperClassName="code-cell-wrapper"
+      options={EDITOR_OPTIONS}
+      scrollbarReserve={HORIZONTAL_SCROLLBAR_RESERVE}
+      applyPreferences={applyCodePreferences}
+    />
   );
 }
